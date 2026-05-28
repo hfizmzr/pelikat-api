@@ -32,6 +32,7 @@ local_settings.py
 db.sqlite3
 media/
 staticfiles/
+models/*.pt
 
 # Environment variables
 .env
@@ -63,3 +64,8 @@ celerybeat.pid
 
 .opencode
 everything-claude-code/
+
+# Codex local MCP configs/secrets
+.codex/config.toml
+.codex/*.local.toml
+.codex/.credentials.json
