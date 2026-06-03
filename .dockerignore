@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+*.egg-info/
+.eggs/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+secrets/
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+.hg/
+.svn/
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.dmypy.json
+
+# Local databases
+*.db
+*.sqlite3
+*.sqlite
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.docker/
+
+# Logs and temp
+logs/
+*.log
+tmp/
+temp/
+
+# Documentation and misc
+README.md
+docs/
+*.md
+
+# Large local directories (specific to this project)
+everything-claude-code/
+.opencode/
+**/node_modules/

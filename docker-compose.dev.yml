@@ -4,12 +4,14 @@ services:
   api:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     ports:
       - "8000:8000"
     environment:
       - DEBUG=True
-      - ALLOWED_HOSTS=localhost,127.0.0.1
+      # `*` allows any host — required when using Cloudflare Tunnel
+      # because requests come through with the tunnel's public hostname.
+      - ALLOWED_HOSTS=localhost,127.0.0.1,*
       - SECRET_KEY=dev-secret-key-do-not-use-in-production
     env_file:
       - .env
@@ -17,3 +19,15 @@ services:
       - .:/app
     command: python manage.py runserver 0.0.0.0:8000
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/\")' 2>/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - pelikat-shared
+
+networks:
+  pelikat-shared:
+    external: true
