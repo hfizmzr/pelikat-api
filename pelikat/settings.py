@@ -19,6 +19,7 @@ INSTALLED_APPS = [
     'apps.ai_photos',
     'apps.qr_security',
     'apps.ecert',
+    'apps.badges',
 ]
 
 MIDDLEWARE = [
