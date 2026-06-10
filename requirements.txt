@@ -11,3 +11,8 @@ paddlepaddle==3.0.0
 celery>=5.3
 redis>=5.0
 gunicorn>=21.0
+pytest>=8.0
+pytest-django>=4.9
+pytest-cov>=5.0
+factory-boy>=3.3
+faker>=24.0
