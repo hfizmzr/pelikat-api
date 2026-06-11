@@ -70,3 +70,6 @@ docs/
 everything-claude-code/
 .opencode/
 **/node_modules/
+
+# Testing
+k6/
