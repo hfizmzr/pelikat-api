@@ -60,6 +60,9 @@ celerybeat.pid
 # Docker
 *.pid
 
+# k6
+.last-run.json
+
 
 .opencode
 everything-claude-code/
@@ -68,3 +71,5 @@ everything-claude-code/
 .codex/config.toml
 .codex/*.local.toml
 .codex/.credentials.json
+
+/docs

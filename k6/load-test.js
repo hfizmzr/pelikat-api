@@ -3,35 +3,65 @@ import { check, sleep } from 'k6';
 
 /**
  * Performance Load Test: pelikat-api (Django)
- * 
+ *
  * NFR: All CRUD API responses shall complete within 500ms under normal load
  *      of up to 500 concurrent users.
- * 
- * Usage: k6 run k6/load-test.js
- * 
- * Environment variables:
- *   - API_BASE_URL: Base URL of the Django API (default: http://localhost:8000)
- *   - INTERNAL_API_KEY: The X-Internal-Key header value (default: test-internal-api-key-12345)
+ *
+ * Usage:
+ *   k6 run k6/load-test.js                              # 500 VUs (staging/prod)
+ *   k6 run k6/load-test.local.js                        # 20 VUs (local smoke)
+ *   K6_VUS=100 k6 run k6/load-test.js                   # override VU count
+ *   INTERNAL_API_KEY=xxx k6 run k6/load-test.js         # pass API key
+ *
+ * Auto-detection:
+ *   - INTERNAL_API_KEY: auto-reads from ../../.env if not set via env var
+ *   - API_BASE_URL: defaults to http://localhost:8000
+ *   - K6_VUS: override max VU count (default: 500)
  */
 
 const BASE_URL = __ENV.API_BASE_URL || 'http://localhost:8000';
-const INTERNAL_KEY = __ENV.INTERNAL_API_KEY || 'test-internal-api-key-12345';
+
+// ── Auto-read INTERNAL_API_KEY from parent .env if not provided ──
+function readApiKey() {
+  if (__ENV.INTERNAL_API_KEY) return __ENV.INTERNAL_API_KEY;
+
+  try {
+    const envFile = open('../.env');
+    const lines = envFile.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('INTERNAL_API_KEY=')) {
+        return trimmed.split('=', 2)[1].replace(/^["']|["']$/g, '');
+      }
+    }
+  } catch (_) {
+    // .env file not found or unreadable
+  }
+
+  console.warn('WARNING: INTERNAL_API_KEY not set. Pass it via:');
+  console.warn('  INTERNAL_API_KEY=$(grep INTERNAL_API_KEY .env | cut -d= -f2) k6 run k6/load-test.js');
+  return '';
+}
+
+const INTERNAL_KEY = readApiKey();
 
 const HEADERS = {
   'Content-Type': 'application/json',
   'X-Internal-Key': INTERNAL_KEY,
 };
 
+// ── VU scaling: use K6_VUS env var or default to 500 ──
+const MAX_VUS = parseInt(__ENV.K6_VUS) || 500;
+
 export const options = {
   stages: [
-    { duration: '30s', target: 100 },   // Ramp up to 100 VUs
-    { duration: '30s', target: 500 },  // Ramp up to 500 VUs
-    { duration: '1m', target: 500 },    // Sustain 500 VUs for 1 minute
-    { duration: '30s', target: 0 },    // Ramp down
+    { duration: '30s', target: Math.min(MAX_VUS * 0.2, 100) },   // ramp to 20%
+    { duration: '30s', target: Math.min(MAX_VUS, 500) },          // ramp to max
+    { duration: '1m', target: MAX_VUS },                           // sustain
+    { duration: '30s', target: 0 },                                // ramp down
   ],
   thresholds: {
     http_req_duration: ['p(95)<500'],   // 95% of requests < 500ms
-    http_req_duration: ['p(99)<1000'],  // 99% of requests < 1000ms
     http_req_failed: ['rate<0.01'],     // Error rate < 1%
   },
 };
@@ -105,6 +135,5 @@ export default function () {
     'POST evaluate duration < 500ms': (r) => r.timings.duration < 500,
   });
 
-  // Random sleep between 0.5s and 2s to simulate realistic user behavior
   sleep(Math.random() * 1.5 + 0.5);
 }
