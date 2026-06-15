@@ -20,6 +20,7 @@ INSTALLED_APPS = [
     'apps.qr_security',
     'apps.ecert',
     'apps.badges',
+    'apps.documents',
 ]
 
 MIDDLEWARE = [
@@ -58,6 +59,7 @@ SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
 SUPABASE_JWT_SECRET = os.environ.get('SUPABASE_JWT_SECRET', '')
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY', '')
+DOCUMENT_ENCRYPTION_KEY = os.environ.get('DOCUMENT_ENCRYPTION_KEY', '')
 
 _AI_PHOTOS_YOLO_MODEL_PATH = os.environ.get('AI_PHOTOS_YOLO_MODEL_PATH')
 AI_PHOTOS_YOLO_MODEL_PATH = str(
