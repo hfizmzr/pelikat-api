@@ -5,4 +5,5 @@ urlpatterns = [
     path('ai/qr/', include('apps.qr_security.urls')),
     path('ai/ecert/', include('apps.ecert.urls')),
     path('ai/badges/', include('apps.badges.urls')),
+    path('ai/documents/', include('apps.documents.urls')),
 ]
