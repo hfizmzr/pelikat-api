@@ -3,9 +3,11 @@ Document Views
 """
 
 import base64
+import re
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from .services import encrypt_document, decrypt_document, delete_document, validate_document
+from .services import _encrypt_ic_number
 
 
 @api_view(["POST"])
@@ -47,6 +49,30 @@ def encrypt_view(request):
         return Response({**result, "warning": validation["reason"]}, status=201)
 
     return Response(result, status=201)
+
+
+@api_view(["POST"])
+def encrypt_ic_view(request):
+    """
+    POST /ai/documents/encrypt-ic
+
+    Request (JSON):
+      { "ic_number": "900101-14-5123", "user_id": "uuid" }
+
+    Manual-entry fallback for runners without an IC photo.
+    Encrypts the IC/Passport number with AES-256-GCM (same key as
+    document encryption) and returns only the ciphertext.
+    """
+    ic_number = (request.data.get("ic_number") or "").strip()
+    user_id = request.data.get("user_id")
+
+    if not ic_number or not user_id:
+        return Response({"error": "ic_number and user_id are required"}, status=400)
+
+    if not re.fullmatch(r"[A-Za-z0-9-]{5,20}", ic_number):
+        return Response({"error": "Invalid IC/Passport number format"}, status=422)
+
+    return Response({"ic_encrypted": _encrypt_ic_number(ic_number)}, status=201)
 
 
 @api_view(["POST"])
