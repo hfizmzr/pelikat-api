@@ -7,6 +7,7 @@ and inserts newly earned badges via service_role key.
 
 from supabase import create_client
 from django.conf import settings
+from apps.ecert.services import generate_cert
 
 def get_sb():
     return create_client(
@@ -112,8 +113,12 @@ BADGE_RULES = [
 def evaluate_badges(runner_id: str, event_id: str | None = None) -> dict:
     """
     Evaluate all badge rules for a runner and award any newly earned badges.
+    Each awarded finisher milestone also gets an e-certificate (failures
+    isolate: a cert error never blocks the badge award).
 
-    Returns dict with 'awarded' list of newly-earned badge definitions.
+    Returns dict with 'awarded' list of newly-earned badge definitions,
+    each entry including a `cert_url` pointing to a signed PNG in
+    Storage (expires in 24h; the badges UI can regenerate on demand).
     """
     sb = get_sb()
 
@@ -131,16 +136,84 @@ def evaluate_badges(runner_id: str, event_id: str | None = None) -> dict:
                     "event_id": event_id,
                     "badge_key": rule["badge_key"],
                 }).execute()
-                awarded.append({
+
+                entry = {
                     "badge_key": rule["badge_key"],
                     "name": rule["name"],
                     "description": rule["description"],
                     "icon": rule["icon"],
-                })
+                }
+
+                try:
+                    cert_url = _generate_milestone_cert(
+                        sb, rule, runner_id, event_id
+                    )
+                    if cert_url:
+                        entry["cert_url"] = cert_url
+                except Exception:
+                    pass
+
+                awarded.append(entry)
         except Exception:
             pass
 
     return {"awarded": awarded}
+
+
+def _generate_milestone_cert(
+    sb, rule: dict, runner_id: str, event_id: str | None
+) -> str | None:
+    """
+    Generate a finisher e-certificate PNG for a badge milestone.
+    Storage key is derived from runner+badge so regeneration overwrites
+    deterministically. Returns a signed URL or None.
+    """
+    profile = (
+        sb.table("runner_profiles")
+        .select("full_name")
+        .eq("id", runner_id)
+        .single()
+        .execute()
+    )
+    runner_name = (profile.data or {}).get("full_name") or "Pelikat Runner"
+
+    event_name = rule["name"]
+    bib_number = "—"
+
+    if event_id:
+        event = (
+            sb.table("events")
+            .select("name, event_date")
+            .eq("id", event_id)
+            .single()
+            .execute()
+        )
+        if event.data:
+            event_name = event.data.get("name") or event_name
+        reg = (
+            sb.table("registrations")
+            .select("bib_number")
+            .eq("runner_id", runner_id)
+            .eq("event_id", event_id)
+            .maybe_single()
+            .execute()
+        )
+        if reg.data and reg.data.get("bib_number"):
+            bib_number = reg.data["bib_number"]
+
+    from datetime import date
+
+    storage_id = f"{runner_id}-{rule['badge_key']}"
+    if event_id:
+        storage_id = f"{storage_id}-{event_id[:8]}"
+
+    return generate_cert(
+        runner_name=runner_name,
+        event_name=event_name,
+        bib_number=bib_number,
+        event_date=date.today().isoformat(),
+        registration_id=storage_id,
+    )
 
 
 def get_badge_definitions() -> list[dict]:
