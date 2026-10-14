@@ -20,7 +20,9 @@ services:
     command: python manage.py runserver 0.0.0.0:8000
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/\")' 2>/dev/null || exit 1"]
+      # Django has no route at "/" — any HTTP status (incl. 404) means the
+      # server is up; only connection failures mark the container unhealthy.
+      test: ["CMD-SHELL", "python -c \"import http.client; c = http.client.HTTPConnection('localhost', 8000, timeout=3); c.request('GET', '/'); c.getresponse().read()\""]
       interval: 10s
       timeout: 5s
       retries: 5
