@@ -63,11 +63,14 @@ def encrypt_ic_view(request):
     Encrypts the IC/Passport number with AES-256-GCM (same key as
     document encryption) and returns only the ciphertext.
     """
-    ic_number = (request.data.get("ic_number") or "").strip()
+    ic_number = request.data.get("ic_number")
     user_id = request.data.get("user_id")
 
     if not ic_number or not user_id:
         return Response({"error": "ic_number and user_id are required"}, status=400)
+    if not isinstance(ic_number, str):
+        return Response({"error": "ic_number must be a string"}, status=422)
+    ic_number = ic_number.strip()
 
     if not re.fullmatch(r"[A-Za-z0-9-]{5,20}", ic_number):
         return Response({"error": "Invalid IC/Passport number format"}, status=422)
