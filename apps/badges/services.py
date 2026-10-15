@@ -5,8 +5,15 @@ Queries runner aggregate stats from Supabase, evaluates badge rules,
 and inserts newly earned badges via service_role key.
 """
 
+import logging
+
+from datetime import date
+
 from supabase import create_client
 from django.conf import settings
+from apps.ecert.services import generate_cert
+
+logger = logging.getLogger(__name__)
 
 def get_sb():
     return create_client(
@@ -112,8 +119,12 @@ BADGE_RULES = [
 def evaluate_badges(runner_id: str, event_id: str | None = None) -> dict:
     """
     Evaluate all badge rules for a runner and award any newly earned badges.
+    Each awarded finisher milestone also gets an e-certificate (failures
+    isolate: a cert error never blocks the badge award).
 
-    Returns dict with 'awarded' list of newly-earned badge definitions.
+    Returns dict with 'awarded' list of newly-earned badge definitions,
+    each entry including a `cert_url` pointing to a signed PNG in
+    Storage (expires in 24h; the badges UI can regenerate on demand).
     """
     sb = get_sb()
 
@@ -126,21 +137,97 @@ def evaluate_badges(runner_id: str, event_id: str | None = None) -> dict:
             continue
         try:
             if rule["meter"](stats):
+                # Generate the certificate BEFORE inserting the badge row.
+                # If rendering fails, the badge is not inserted, so the next
+                # evaluation retries award + certificate (self-healing).
+                cert_url = _generate_milestone_cert(
+                    sb, rule, runner_id, event_id
+                )
+
                 sb.table("runner_badges").insert({
                     "runner_id": runner_id,
                     "event_id": event_id,
                     "badge_key": rule["badge_key"],
                 }).execute()
-                awarded.append({
+
+                entry = {
                     "badge_key": rule["badge_key"],
                     "name": rule["name"],
                     "description": rule["description"],
                     "icon": rule["icon"],
-                })
+                }
+                if cert_url:
+                    entry["cert_url"] = cert_url
+
+                awarded.append(entry)
         except Exception:
-            pass
+            logger.exception("Badge rule evaluation failed: %s", rule["badge_key"])
 
     return {"awarded": awarded}
+
+
+def _generate_milestone_cert(
+    sb, rule: dict, runner_id: str, event_id: str | None
+) -> str | None:
+    """
+    Generate a finisher e-certificate PNG for a badge milestone.
+    Storage key is derived from runner+badge so regeneration overwrites
+    deterministically. Returns a signed URL or None.
+    """
+    profile = (
+        sb.table("runner_profiles")
+        .select("full_name")
+        .eq("id", runner_id)
+        .single()
+        .execute()
+    )
+    runner_name = (profile.data or {}).get("full_name") or "Pelikat Runner"
+
+    event_name = rule["name"]
+    bib_number = "—"
+    event_date = date.today().isoformat()
+
+    if event_id:
+        event = (
+            sb.table("events")
+            .select("name, event_date")
+            .eq("id", event_id)
+            .single()
+            .execute()
+        )
+        if not event.data:
+            return None
+        event_name = event.data.get("name") or event_name
+
+        reg = (
+            sb.table("registrations")
+            .select("bib_number")
+            .eq("runner_id", runner_id)
+            .eq("event_id", event_id)
+            .maybe_single()
+            .execute()
+        )
+        # Require a matching registration before issuing an event
+        # certificate; otherwise the cert would name an event the runner
+        # never registered for. The badge itself may still be awarded.
+        if not reg.data or not reg.data.get("bib_number"):
+            return None
+        bib_number = reg.data["bib_number"]
+
+        if event.data.get("event_date"):
+            event_date = event.data["event_date"]
+
+    storage_id = f"{runner_id}-{rule['badge_key']}"
+    if event_id:
+        storage_id = f"{storage_id}-{event_id[:8]}"
+
+    return generate_cert(
+        runner_name=runner_name,
+        event_name=event_name,
+        bib_number=bib_number,
+        event_date=date.today().isoformat(),
+        registration_id=storage_id,
+    )
 
 
 def get_badge_definitions() -> list[dict]:

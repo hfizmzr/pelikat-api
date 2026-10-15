@@ -93,6 +93,11 @@ def consent_code(request):
     code = generate_consent_code()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
 
+    sb.table('repc_consent_codes').update({'is_used': True})\
+        .eq('registration_id', registration_id)\
+        .eq('is_used', False)\
+        .execute()
+
     sb.table('repc_consent_codes').insert({
         'registration_id': registration_id,
         'organizer_id': reg['organizer_id'],

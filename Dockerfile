@@ -12,6 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy only requirements first for better layer caching
 COPY requirements.txt .
+
+# CPU-only torch: ultralytics would otherwise pull the ~5GB CUDA wheel build
+# (container is CPU-only; GPU runs of YOLO happen on the host)
+RUN pip install --no-cache-dir torch torchvision \
+    --index-url https://download.pytorch.org/whl/cpu
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the application code
