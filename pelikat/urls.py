@@ -6,4 +6,5 @@ urlpatterns = [
     path('ai/ecert/', include('apps.ecert.urls')),
     path('ai/badges/', include('apps.badges.urls')),
     path('ai/documents/', include('apps.documents.urls')),
+    path('payments/', include('apps.payments.urls')),
 ]

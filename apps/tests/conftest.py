@@ -15,13 +15,19 @@ def setup_test_env():
     os.environ['SUPABASE_URL'] = 'https://test.supabase.co'
     os.environ['SUPABASE_SERVICE_ROLE_KEY'] = 'test-service-role-key-12345'
     os.environ['SECRET_KEY'] = 'test-secret-key-not-for-production'
-    
+    os.environ['HITPAY_API_URL'] = 'https://api.sandbox.hit-pay.com/v1'
+    os.environ['HITPAY_API_KEY'] = 'test-hitpay-key'
+    os.environ['HITPAY_WEBHOOK_SALT'] = 'test-webhook-salt'
+
     # Reload settings
     from django.conf import settings as django_settings
     django_settings.INTERNAL_API_KEY = 'test-internal-api-key-12345'
     django_settings.HMAC_SECRET = 'test-hmac-secret-key-12345'
     django_settings.SUPABASE_URL = 'https://test.supabase.co'
     django_settings.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key-12345'
+    django_settings.HITPAY_API_URL = 'https://api.sandbox.hit-pay.com/v1'
+    django_settings.HITPAY_API_KEY = 'test-hitpay-key'
+    django_settings.HITPAY_WEBHOOK_SALT = 'test-webhook-salt'
 
 @pytest.fixture
 def api_client():
