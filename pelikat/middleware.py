@@ -6,6 +6,8 @@ prevent public access — except the HitPay webhook path, which is
 protected by Hitpay-Signature verification instead.
 """
 
+import hmac
+
 from django.conf import settings
 from django.http import JsonResponse
 
@@ -27,6 +29,7 @@ class InternalKeyMiddleware:
     def __call__(self, request):
         if _requires_internal_key(request.path):
             key = request.headers.get('X-Internal-Key', '')
-            if key != settings.INTERNAL_API_KEY:
+            # L1: constant-time comparison (timing-attack safe).
+            if not hmac.compare_digest(key, settings.INTERNAL_API_KEY or ''):
                 return JsonResponse({'error': 'Unauthorized'}, status=401)
         return self.get_response(request)
