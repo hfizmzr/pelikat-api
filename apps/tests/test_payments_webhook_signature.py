@@ -24,6 +24,19 @@ def _sign(body: bytes, salt: str = WEBHOOK_SALT) -> str:
     return hmac.new(salt.encode(), body, hashlib.sha256).hexdigest()
 
 
+def _hash(body: bytes) -> str:
+    """Payload-hash the service stores in webhook_events for dedupe."""
+    return hashlib.sha256(body).hexdigest()
+
+
+def _headers(body: bytes, event: str = 'payment_request.completed',
+             signature: str | None = None) -> dict:
+    return {
+        'HTTP_HITPAY_SIGNATURE': signature if signature is not None else _sign(body),
+        'HTTP_HITPAY_EVENT_TYPE': event,
+    }
+
+
 def _pr_body(status: str = 'completed', payment_id: str = 'pay-1',
              rail: str = 'grabpay_direct') -> bytes:
     body = {
@@ -161,6 +174,136 @@ class TestHitpayWebhookSignature:
             second = api_client.post(WEBHOOK_PATH, data=body,
                                      content_type='application/json', **headers)
         assert second.status_code == 200
+        mock_sb.rpc.assert_not_called()
+
+
+@pytest.mark.security
+class TestWebhookSignatureNormalization:
+    """L3: hex digests are case-insensitive; whitespace must not matter."""
+
+    def test_uppercase_hex_signature_accepted(self, api_client):
+        body = _pr_body()
+        mock_sb = MagicMock()
+        with patch('apps.payments.services.get_sb', return_value=mock_sb):
+            response = api_client.post(
+                WEBHOOK_PATH, data=body, content_type='application/json',
+                **_headers(body, signature=_sign(body).upper()),
+            )
+        assert response.status_code == 200
+
+    def test_whitespace_padded_signature_accepted(self, api_client):
+        body = _pr_body()
+        mock_sb = MagicMock()
+        with patch('apps.payments.services.get_sb', return_value=mock_sb):
+            response = api_client.post(
+                WEBHOOK_PATH, data=body, content_type='application/json',
+                **_headers(body, signature='  ' + _sign(body).upper() + ' '),
+            )
+        assert response.status_code == 200
+
+
+@pytest.mark.security
+class TestWebhookAmountMismatchAudit:
+    """M6: under/overcharge detection — confirm proceeds, mismatch audited."""
+
+    def _mismatch_mock(self, stored_amount: str) -> MagicMock:
+        mock_sb = MagicMock()
+        mock_sb.table.return_value.select.return_value.eq.return_value \
+            .limit.return_value.execute.return_value = \
+            MagicMock(data=[{'amount': stored_amount}])
+        return mock_sb
+
+    def test_amount_mismatch_audited_but_still_confirmed(self, api_client):
+        """Charge 10.00 vs PR 8.00 → audit row + normal confirmation."""
+        mock_sb = self._mismatch_mock('8.00')
+        body = _pr_body(payment_id='pay-1', rail='fpx')
+        with patch('apps.payments.services.get_sb', return_value=mock_sb):
+            response = api_client.post(
+                WEBHOOK_PATH, data=body, content_type='application/json',
+                **_headers(body),
+            )
+        assert response.status_code == 200
+        mock_sb.rpc.assert_called_once_with(
+            'confirm_payment',
+            {'p_provider_request_id': 'pr-123',
+             'p_provider_payment_id': 'pay-1', 'p_rail': 'fpx'},
+        )
+        mock_sb.table.return_value.insert.assert_any_call({
+            'action': 'payment_amount_mismatch',
+            'target_id': 'reg-123',
+            'metadata': {
+                'provider_request_id': 'pr-123',
+                'pr_amount': '8.00',
+                'charge_amount': '10.00',
+            },
+        })
+
+    def test_matching_amount_no_mismatch_audit(self, api_client):
+        mock_sb = self._mismatch_mock('10.00')
+        body = _pr_body(payment_id='pay-1', rail='fpx')
+        with patch('apps.payments.services.get_sb', return_value=mock_sb):
+            response = api_client.post(
+                WEBHOOK_PATH, data=body, content_type='application/json',
+                **_headers(body),
+            )
+        assert response.status_code == 200
+        mismatches = [
+            c.args[0] for c in mock_sb.table.return_value.insert.call_args_list
+            if c.args and c.args[0].get('action') == 'payment_amount_mismatch'
+        ]
+        assert mismatches == []
+
+
+@pytest.mark.security
+class TestWebhookHandlerFailureRelease:
+    """H1: a crash after the dedupe insert must release the row so a
+    HitPay redelivery reprocesses the event instead of being dedupe-blocked."""
+
+    def test_rpc_failure_returns_200_and_releases_event_row(self, api_client):
+        mock_sb = MagicMock()
+        mock_sb.rpc.return_value.execute.side_effect = \
+            Exception('confirm_payment blew up')
+        body = _pr_body()
+        with patch('apps.payments.services.get_sb', return_value=mock_sb):
+            response = api_client.post(
+                WEBHOOK_PATH, data=body, content_type='application/json',
+                **_headers(body),
+            )
+        assert response.status_code == 200  # never 500 to HitPay
+        mock_sb.table.return_value.delete.return_value.eq \
+            .assert_called_once_with('payload_hash', _hash(body))
+
+    def test_redelivery_after_release_reprocesses_event(self, api_client):
+        """With the released row, a redelivery runs the handler again."""
+        mock_sb = MagicMock()
+        mock_sb.rpc.return_value.execute.side_effect = [
+            Exception('confirm_payment blew up'), MagicMock(data=[]),
+        ]
+        body = _pr_body()
+        headers = _headers(body)
+        with patch('apps.payments.services.get_sb', return_value=mock_sb):
+            first = api_client.post(WEBHOOK_PATH, data=body,
+                                    content_type='application/json', **headers)
+            second = api_client.post(WEBHOOK_PATH, data=body,
+                                     content_type='application/json', **headers)
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert mock_sb.rpc.call_count == 2
+
+    def test_failed_event_without_id_skipped_silently(self, api_client):
+        """L4: payment_request.failed with no object id — log + skip, no query."""
+        body = json.dumps({
+            'object': 'payment_request',
+            'status': 'failed',
+        }).encode()
+        mock_sb = MagicMock()
+        with patch('apps.payments.services.get_sb', return_value=mock_sb):
+            response = api_client.post(
+                WEBHOOK_PATH, data=body, content_type='application/json',
+                **_headers(body, event='payment_request.failed'),
+            )
+        assert response.status_code == 200
+        assert mock_sb.table.return_value.update.call_count == 0
         mock_sb.rpc.assert_not_called()
 
     def test_webhook_always_200_for_verified_payloads(self, api_client):

@@ -10,11 +10,13 @@ import hmac
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from supabase import create_client
 
-from .hitpay import create_payment_request, create_refund
+from .hitpay import (HitPayError, create_payment_request, create_refund,
+                     get_payment_request)
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,8 @@ def verify_signature(raw_body: bytes, signature: str) -> bool:
     expected = hmac.new(
         settings.HITPAY_WEBHOOK_SALT.encode(), raw_body, hashlib.sha256
     ).hexdigest()
-    return hmac.compare_digest(expected, signature)
+    # L3: hex digests are case-insensitive; trim padding before comparing.
+    return hmac.compare_digest(expected, signature.strip().lower())
 
 
 def _is_duplicate(exc: Exception) -> bool:
@@ -57,6 +60,68 @@ def _is_duplicate(exc: Exception) -> bool:
 
 
 # ── WEBHOOK ──────────────────────────────────────────────────
+
+def _audit_amount_mismatch(sb, data: dict, succeeded: dict | None) -> None:
+    """M6: detect under/overcharge. Confirmation always proceeds (the
+    customer paid what HitPay charged) — the mismatch is audit-logged."""
+    if not succeeded or not succeeded.get('amount'):
+        return
+    result = (sb.table('payments').select('amount')
+              .eq('provider_request_id', data.get('id')).limit(1).execute())
+    rows = result.data if isinstance(result.data, list) else []
+    if not rows or rows[0].get('amount') is None:
+        return
+    stored_amount = Decimal(str(rows[0]['amount']))
+    charge_amount = Decimal(str(succeeded['amount']))
+    if abs(stored_amount - charge_amount) > Decimal('0.01'):
+        sb.table('audit_log').insert({
+            'action': 'payment_amount_mismatch',
+            'target_id': data.get('reference_number'),
+            'metadata': {
+                'provider_request_id': data.get('id'),
+                'pr_amount': str(stored_amount),
+                'charge_amount': str(charge_amount),
+            },
+        }).execute()
+        logger.warning(
+            'payment_amount_mismatch: PR %s expected %s, charge %s',
+            data.get('id'), stored_amount, charge_amount,
+        )
+
+
+def _handle_verified_event(sb, event_type: str, data: dict) -> None:
+    """Act on a verified webhook payload (insert of the dedupe row is done)."""
+    if event_type == 'payment_request.completed' and data.get('status') == 'completed':
+        payments = data.get('payments') or []
+        succeeded = next((p for p in payments if p.get('status') == 'succeeded'), None)
+        try:
+            _audit_amount_mismatch(sb, data, succeeded)
+        except Exception:
+            # Advisory check — a failure here must never block confirmation.
+            logger.exception('payment_amount_mismatch check failed for %s',
+                             data.get('id'))
+        sb.rpc('confirm_payment', {
+            'p_provider_request_id': data.get('id'),
+            'p_provider_payment_id': succeeded.get('id') if succeeded else None,
+            'p_rail': succeeded.get('payment_type') if succeeded else None,
+        }).execute()
+    elif event_type == 'payment_request.failed':
+        # L4: without an object id the failure cannot be scoped to a row —
+        # a .eq(None) filter would sweep unmatched rows. Log and skip.
+        if not data.get('id'):
+            logger.warning('payment_request.failed without object id; skipping event')
+            return
+        reason = None
+        for p in data.get('payments') or []:
+            if p.get('status_reason_code'):
+                reason = p['status_reason_code']
+                break
+        sb.table('payments').update({
+            'status': 'failed',
+            'last_webhook_payload': data,
+        }).eq('provider_request_id', data.get('id')).execute()
+        logger.warning('HitPay payment request %s failed (%s)', data.get('id'), reason)
+
 
 def handle_webhook(raw_body: bytes, signature: str, event_type: str) -> tuple[int, dict]:
     """Process a HitPay webhook. Returns (http_status, body).
@@ -88,25 +153,24 @@ def handle_webhook(raw_body: bytes, signature: str, event_type: str) -> tuple[in
             return 200, {'status': 'duplicate'}
         raise
 
-    if event_type == 'payment_request.completed' and data.get('status') == 'completed':
-        payments = data.get('payments') or []
-        succeeded = next((p for p in payments if p.get('status') == 'succeeded'), None)
-        sb.rpc('confirm_payment', {
-            'p_provider_request_id': data.get('id'),
-            'p_provider_payment_id': succeeded.get('id') if succeeded else None,
-            'p_rail': succeeded.get('payment_type') if succeeded else None,
-        }).execute()
-    elif event_type == 'payment_request.failed':
-        reason = None
-        for p in data.get('payments') or []:
-            if p.get('status_reason_code'):
-                reason = p['status_reason_code']
-                break
-        sb.table('payments').update({
-            'status': 'failed',
-            'last_webhook_payload': data,
-        }).eq('provider_request_id', data.get('id')).execute()
-        logger.warning('HitPay payment request %s failed (%s)', data.get('id'), reason)
+    try:
+        _handle_verified_event(sb, event_type, data)
+    except Exception:
+        # H1: the dedupe row already exists, so a 500 here would swallow the
+        # verified event forever (the redelivery would hit the payload_hash
+        # unique constraint). Release the row (best-effort) so HitPay's
+        # redelivery reprocesses, and answer 200 either way. Log loudly —
+        # event type and object id only, never payload or secrets.
+        logger.exception(
+            'Webhook handler failed event_type=%s object_id=%s; releasing '
+            'webhook_events row for redelivery', event_type, data.get('id'))
+        try:
+            sb.table('webhook_events').delete() \
+                .eq('payload_hash', payload_hash).execute()
+        except Exception:
+            logger.exception('Could not release webhook_events row '
+                             '(object_id=%s)', data.get('id'))
+        return 200, {'status': 'handler_error'}
 
     return 200, {'status': 'ok'}
 
@@ -136,6 +200,49 @@ def _server_amount(sb, order_type: str, registration_id: str | None,
     return None
 
 
+def _find_active_payment(sb, order_type: str, registration_id: str | None,
+                         merch_order_id: str | None,
+                         organizer_id: str | None) -> dict | None:
+    """M1: an existing *pending* payments row for the same order — a PR was
+    already created for it, so callers must reuse it instead of creating a
+    duplicate payment request against HitPay."""
+    if order_type == 'registration' and registration_id:
+        key_col, key_val = 'registration_id', registration_id
+    elif order_type == 'merch' and merch_order_id:
+        key_col, key_val = 'merch_order_id', merch_order_id
+    elif order_type == 'organizer_subscription' and organizer_id:
+        key_col, key_val = 'organizer_id', organizer_id
+    else:
+        return None
+    result = (sb.table('payments').select('*')
+              .eq('order_type', order_type).eq(key_col, key_val)
+              .order('created_at', desc=True).limit(1).execute())
+    rows = result.data or []
+    row = rows[0] if rows else None
+    if row and row.get('status') == 'pending' and row.get('provider_request_id'):
+        return row
+    return None
+
+
+def _reuse_pending_payment(existing: dict) -> tuple[int, dict]:
+    """Return the existing pending PR (200) without hitting the create
+    endpoint; re-fetch the PR from HitPay for the freshest checkout URL."""
+    pr: dict = {}
+    try:
+        pr = get_payment_request(existing['provider_request_id'])
+    except Exception:
+        logger.warning('Could not re-fetch HitPay PR %s; reusing stored payment row',
+                       existing['provider_request_id'], exc_info=True)
+    qr = (existing.get('qr_code_data') or {}).get('qr_code')
+    return 200, {
+        'provider_request_id': existing['provider_request_id'],
+        'checkout_url': pr.get('url'),
+        'qr_code': qr,
+        'direct_link_url': (pr.get('direct_link') or {}).get('direct_link_url'),
+        'status': pr.get('status', existing.get('status')),
+    }
+
+
 def create_payment(data: dict) -> tuple[int, dict]:
     """Create a HitPay payment request and snapshot the payment row."""
     order_type = data.get('order_type')
@@ -149,6 +256,12 @@ def create_payment(data: dict) -> tuple[int, dict]:
         return 400, {'error': 'amount is required'}
 
     sb = get_sb()
+
+    existing = _find_active_payment(sb, order_type, registration_id,
+                                    merch_order_id, organizer_id)
+    if existing:
+        return _reuse_pending_payment(existing)
+
     server_amount = _server_amount(sb, order_type, registration_id, merch_order_id)
     if server_amount is not None and abs(server_amount - client_amount) > 0.01:
         return 422, {'error': 'Amount mismatch with server-side price'}
@@ -184,11 +297,8 @@ def create_payment(data: dict) -> tuple[int, dict]:
 
     try:
         pr = create_payment_request(payload)
-    except Exception as exc:
-        from .hitpay import HitPayError
-        if isinstance(exc, HitPayError):
-            return 422, {'error': exc.message, 'errors': exc.errors}
-        raise
+    except HitPayError as exc:
+        return 422, {'error': exc.message, 'errors': exc.errors}
 
     qr_code = None
     qr_data = pr.get('qr_code_data')
@@ -244,6 +354,21 @@ def get_payment_status(reference_number: str) -> tuple[int, dict]:
 
 # ── REFUND ───────────────────────────────────────────────────
 
+def _validated_refund_amount(amount: str | None, stored_amount: str) -> str:
+    """M3: client-supplied amounts must be numeric, > 0 and ≤ stored amount
+    (0.01 tolerance for rounding). ValueErrors map to 422."""
+    try:
+        refund_amount = (Decimal(str(amount)) if amount is not None
+                         else Decimal(str(stored_amount)))
+        if refund_amount <= 0:
+            raise ValueError('Refund amount must be greater than zero')
+        if refund_amount > Decimal(str(stored_amount)) + Decimal('0.01'):
+            raise ValueError('Refund amount exceeds the payment amount')
+    except InvalidOperation:
+        raise ValueError('Refund amount must be a number')
+    return f'{refund_amount:.2f}'
+
+
 def refund_payment(provider_request_id: str, amount: str | None) -> tuple[int, dict]:
     """Refund a completed payment, refusing manual-disbursement rails."""
     sb = get_sb()
@@ -267,13 +392,54 @@ def refund_payment(provider_request_id: str, amount: str | None) -> tuple[int, d
     if payment.get('status') not in ('completed', 'partially_refunded'):
         return 422, {'error': f"Payment is {payment.get('status')}, not refundable"}
 
-    refund_amount = amount or str(payment['amount'])
-    refund = create_refund(payment['provider_payment_id'], refund_amount)
+    # M2: refunding needs the charge id, not the payment-request id.
+    if not payment.get('provider_payment_id'):
+        sb.table('payments').update({
+            'refund_blocked_reason': 'no_charge_reference',
+        }).eq('provider_request_id', provider_request_id).execute()
+        return 409, {
+            'error': 'no charge reference; manual disbursement or reconcile first',
+            'refund_blocked_reason': 'no_charge_reference',
+        }
+
+    try:
+        refund_amount = _validated_refund_amount(amount, payment['amount'])
+    except ValueError as exc:
+        return 422, {'error': str(exc)}
+
+    # H2: atomic double-refund guard. `status` is CHECK-constrained (there is
+    # no 'refunding' value), so claim the row via the free-text
+    # refund_blocked_reason marker instead: the conditional update succeeds
+    # for exactly one concurrent caller (WHERE status refundable AND marker
+    # NULL). A 0-row update means another request already holds the claim or
+    # finalised the refund → 409. Only the winner may call HitPay.
+    claim = (sb.table('payments')
+             .update({'refund_blocked_reason': 'refund_in_progress'})
+             .eq('provider_request_id', provider_request_id)
+             .in_('status', ('completed', 'partially_refunded'))
+             .is_('refund_blocked_reason', 'null')
+             .execute())
+    if not (claim.data or []):
+        return 409, {
+            'error': 'already refunded or refund already in progress',
+            'refund_blocked_reason': 'refund_in_progress',
+        }
+
+    try:
+        refund = create_refund(payment['provider_payment_id'], refund_amount)
+    except Exception as exc:
+        # Release the claim so a corrected retry can claim again; HitPay may
+        # or may not have processed it — reconciliation will surface truth.
+        logger.exception('Refund failed at HitPay for %s', provider_request_id)
+        sb.table('payments').update({'refund_blocked_reason': None}) \
+            .eq('provider_request_id', provider_request_id).execute()
+        return 502, {'error': 'Refund failed at HitPay', 'message': str(exc)}
 
     new_status = 'partially_refunded' if float(refund_amount) < float(payment['amount']) \
         else 'refunded'
     sb.table('payments').update({
         'status': new_status,
+        'refund_blocked_reason': None,
     }).eq('provider_request_id', provider_request_id).execute()
 
     sb.table('audit_log').insert({
@@ -291,10 +457,20 @@ def refund_payment(provider_request_id: str, amount: str | None) -> tuple[int, d
 
 # ── RECONCILE ────────────────────────────────────────────────
 
-def reconcile_stale_payments() -> dict:
-    """Poll HitPay for pending payments older than RECONCILE_STALE_AFTER."""
-    from .hitpay import get_payment_request
+def _reconcile_claim_hash(provider_request_id: str) -> str:
+    """Deterministic dedupe key for a reconcile-poll claim of one payment."""
+    return hashlib.sha256(f'reconcile:{provider_request_id}'.encode()).hexdigest()
 
+
+def reconcile_stale_payments() -> dict:
+    """Poll HitPay for pending payments older than RECONCILE_STALE_AFTER.
+
+    L2: each stale row is claimed by inserting a (unique) webhook_events row
+    keyed off the provider_request_id BEFORE polling — overlapping cron runs
+    hit the payload_hash unique constraint and skip already-claimed rows, so
+    there is no double-poll or double-audit. Failed claims are released so
+    the next run retries.
+    """
     sb = get_sb()
     cutoff = (datetime.now(timezone.utc) - RECONCILE_STALE_AFTER).isoformat()
     stale = (sb.table('payments').select('*')
@@ -305,37 +481,69 @@ def reconcile_stale_payments() -> dict:
 
     summary = {'polled': 0, 'completed': 0, 'recorded': 0}
     for payment in rows:
+        provider_request_id = payment['provider_request_id']
+        claim_hash = _reconcile_claim_hash(provider_request_id)
         try:
-            pr = get_payment_request(payment['provider_request_id'])
-        except Exception as exc:
-            logger.warning('Reconcile poll failed for %s: %s',
-                           payment['provider_request_id'], exc)
-            continue
-        summary['polled'] += 1
-        status = pr.get('status')
-
-        if status == 'completed':
-            payments = pr.get('payments') or []
-            succeeded = next(
-                (p for p in payments if p.get('status') == 'succeeded'), None)
-            sb.rpc('confirm_payment', {
-                'p_provider_request_id': payment['provider_request_id'],
-                'p_provider_payment_id': succeeded.get('id') if succeeded else None,
-                'p_rail': succeeded.get('payment_type') if succeeded else None,
+            sb.table('webhook_events').insert({
+                'provider': 'hitpay',
+                'event_type': 'reconcile.poll',
+                'object_id': provider_request_id,
+                'payload': {
+                    'type': 'reconcile_claim',
+                    'ran_at': datetime.now(timezone.utc).isoformat(),
+                },
+                'payload_hash': claim_hash,
             }).execute()
-            summary['completed'] += 1
-        elif status in ('failed', 'expired', 'canceled'):
-            sb.table('payments').update({'status': status}) \
-                .eq('provider_request_id', payment['provider_request_id']).execute()
-            summary['recorded'] += 1
+        except Exception as exc:
+            if _is_duplicate(exc):
+                logger.info('Reconcile: row %s already claimed by another run; skipping',
+                            provider_request_id)
+                continue
+            raise
 
-        sb.table('audit_log').insert({
-            'action': 'payment_reconciled',
-            'target_id': payment.get('registration_id') or payment.get('organizer_id'),
-            'metadata': {
-                'provider_request_id': payment['provider_request_id'],
-                'hitpay_status': status,
-            },
-        }).execute()
+        try:
+            try:
+                pr = get_payment_request(provider_request_id)
+            except Exception as exc:
+                logger.warning('Reconcile poll failed for %s: %s',
+                               provider_request_id, exc)
+                raise
+            summary['polled'] += 1
+            status = pr.get('status')
+
+            if status == 'completed':
+                payments = pr.get('payments') or []
+                succeeded = next(
+                    (p for p in payments if p.get('status') == 'succeeded'), None)
+                sb.rpc('confirm_payment', {
+                    'p_provider_request_id': provider_request_id,
+                    'p_provider_payment_id': succeeded.get('id') if succeeded else None,
+                    'p_rail': succeeded.get('payment_type') if succeeded else None,
+                }).execute()
+                summary['completed'] += 1
+            elif status in ('failed', 'expired', 'canceled'):
+                sb.table('payments').update({'status': status}) \
+                    .eq('provider_request_id', provider_request_id).execute()
+                summary['recorded'] += 1
+
+            sb.table('audit_log').insert({
+                'action': 'payment_reconciled',
+                'target_id': payment.get('registration_id') or payment.get('organizer_id'),
+                'metadata': {
+                    'provider_request_id': provider_request_id,
+                    'hitpay_status': status,
+                },
+            }).execute()
+        except Exception:
+            # Release the claim so the next run retries this row.
+            logger.exception('Reconcile processing failed for %s — releasing claim',
+                             provider_request_id)
+            try:
+                sb.table('webhook_events').delete() \
+                    .eq('payload_hash', claim_hash).execute()
+            except Exception:
+                logger.exception('Could not release reconcile claim for %s',
+                                 provider_request_id)
+            continue
 
     return summary
