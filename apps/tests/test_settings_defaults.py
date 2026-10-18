@@ -1,4 +1,7 @@
 """Settings defaults must be production-safe when the env var is unset (M5)."""
+import pytest
+from django.core.exceptions import ImproperlyConfigured
+
 import pelikat.settings as settings_module
 
 
@@ -16,6 +19,29 @@ def _load_fresh_settings(monkeypatch):
 def test_debug_defaults_false_when_unset(monkeypatch):
     monkeypatch.delenv('DEBUG', raising=False)
     namespace = _load_fresh_settings(monkeypatch)
+    assert namespace['DEBUG'] is False
+
+
+# INTERNAL_API_KEY (M-fix): production must refuse to boot without it.
+def test_missing_internal_key_raises_when_debug_false(monkeypatch):
+    monkeypatch.delenv('INTERNAL_API_KEY', raising=False)
+    monkeypatch.delenv('DEBUG', raising=False)
+    with pytest.raises(ImproperlyConfigured, match='INTERNAL_API_KEY'):
+        _load_fresh_settings(monkeypatch)
+
+
+def test_missing_internal_key_ok_when_debug_true(monkeypatch):
+    monkeypatch.delenv('INTERNAL_API_KEY', raising=False)
+    monkeypatch.setenv('DEBUG', '1')
+    namespace = _load_fresh_settings(monkeypatch)
+    assert namespace['INTERNAL_API_KEY'] == ''
+
+
+def test_internal_key_set_ok_when_debug_false(monkeypatch):
+    monkeypatch.setenv('INTERNAL_API_KEY', 'secret-key')
+    monkeypatch.delenv('DEBUG', raising=False)
+    namespace = _load_fresh_settings(monkeypatch)
+    assert namespace['INTERNAL_API_KEY'] == 'secret-key'
     assert namespace['DEBUG'] is False
 
 

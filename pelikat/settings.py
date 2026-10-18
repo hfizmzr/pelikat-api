@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -61,6 +63,10 @@ SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
 SUPABASE_JWT_SECRET = os.environ.get('SUPABASE_JWT_SECRET', '')
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY', '')
+
+if not INTERNAL_API_KEY and not DEBUG:
+    raise ImproperlyConfigured(
+        'INTERNAL_API_KEY must be set when DEBUG is False')
 DOCUMENT_ENCRYPTION_KEY = os.environ.get('DOCUMENT_ENCRYPTION_KEY', '')
 HITPAY_API_URL = os.environ.get('HITPAY_API_URL', '')
 HITPAY_API_KEY = os.environ.get('HITPAY_API_KEY', '')
