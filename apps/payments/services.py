@@ -462,14 +462,40 @@ def _reconcile_claim_hash(provider_request_id: str) -> str:
     return hashlib.sha256(f'reconcile:{provider_request_id}'.encode()).hexdigest()
 
 
+# L2: a reconcile claim older than this is considered orphaned (hard cron
+# kill) and is reclaimed by the next run.
+RECONCILE_CLAIM_TTL = timedelta(minutes=10)
+
+
+def _reconcile_claim_orphaned(sb, claim_hash: str) -> bool:
+    """True when an existing reconcile.poll claim row is older than the TTL.
+
+    Scoped by the exact claim payload_hash — real webhook event rows are
+    never inspected or touched by this.
+    """
+    row = (sb.table('webhook_events').select('received_at')
+           .eq('payload_hash', claim_hash)
+           .maybeSingle().execute())
+    data = row.data if isinstance(row.data, dict) else {}
+    received = data.get('received_at')
+    if not isinstance(received, str):
+        return False  # can't verify age → keep the conservative skip
+    try:
+        ts = datetime.fromisoformat(received.replace('Z', '+00:00'))
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - ts) > RECONCILE_CLAIM_TTL
+
+
 def reconcile_stale_payments() -> dict:
     """Poll HitPay for pending payments older than RECONCILE_STALE_AFTER.
 
     L2: each stale row is claimed by inserting a (unique) webhook_events row
     keyed off the provider_request_id BEFORE polling — overlapping cron runs
     hit the payload_hash unique constraint and skip already-claimed rows, so
-    there is no double-poll or double-audit. Failed claims are released so
-    the next run retries.
+    there is no double-poll or double-audit. Claims older than
+    RECONCILE_CLAIM_TTL are treated as orphaned (hard cron kill) and
+    reclaimed; successful runs release their claim after processing.
     """
     sb = get_sb()
     cutoff = (datetime.now(timezone.utc) - RECONCILE_STALE_AFTER).isoformat()
@@ -496,10 +522,23 @@ def reconcile_stale_payments() -> dict:
             }).execute()
         except Exception as exc:
             if _is_duplicate(exc):
-                logger.info('Reconcile: row %s already claimed by another run; skipping',
+                # L2: short claim rows taken by a killed cron run must not pin
+                # a payment forever — reclaim after the TTL.
+                if _reconcile_claim_orphaned(sb, claim_hash):
+                    try:
+                        sb.table('webhook_events').delete() \
+                            .eq('payload_hash', claim_hash).execute()
+                    except Exception:
+                        logger.exception(
+                            'Could not reclaim orphaned reconcile claim for %s',
                             provider_request_id)
-                continue
-            raise
+                        continue
+                else:
+                    logger.info('Reconcile: row %s already claimed by another '
+                                'run; skipping', provider_request_id)
+                    continue
+            else:
+                raise
 
         try:
             try:
@@ -545,6 +584,10 @@ def reconcile_stale_payments() -> dict:
                 },
             }).execute()
 
+            # L2: success → release the claim so future stale runs can
+            # re-poll this PR if it ever goes stale again.
+            sb.table('webhook_events').delete() \
+                .eq('payload_hash', claim_hash).execute()
         except Exception:
             # Release the claim so the next run retries this row.
             logger.exception('Reconcile processing failed for %s — releasing claim',

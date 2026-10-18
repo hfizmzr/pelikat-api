@@ -2,7 +2,9 @@
 HitPay payments flow tests: create / status / refund / reconcile,
 plus internal-key middleware behaviour for the /payments/* surface.
 """
+import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -511,3 +513,104 @@ class TestReconcileMarkerRelease:
                     payments.update.return_value.eq.return_value.eq.call_args_list
                 ]
                 assert ('refund_blocked_reason', 'no_charge_reference') in guard
+
+
+@pytest.mark.reliability
+class TestReconcileClaimLifecycle:
+    """L2: claims must release on success and reclaim after a 10-minute TTL —
+    but only 'reconcile.poll' claim rows, never real webhook events."""
+
+    def test_success_releases_claim_and_next_run_can_repoll(self):
+        payments = _table([{
+            'provider_request_id': 'pr-9', 'registration_id': 'reg-1',
+            'organizer_id': None, 'status': 'pending',
+            'created_at': '2026-10-17T00:00:00Z',
+        }])
+        events = _table()
+        events.insert.return_value.execute = MagicMock(
+            side_effect=[MagicMock(data=[]), MagicMock(data=[])])
+        sb = _mock_sb(payments=payments, webhook_events=events)
+        pr = {'id': 'pr-9', 'status': 'expired'}
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.get_payment_request',
+                   return_value=pr) as mock_get:
+            call_command('reconcile_payments')
+            call_command('reconcile_payments')
+        assert mock_get.call_count == 2
+        eqs = [c.args for c in events.delete.return_value.eq.call_args_list]
+        claim_hash = hashlib.sha256(b'reconcile:pr-9').hexdigest()
+        assert eqs.count(('payload_hash', claim_hash)) >= 1
+
+    def test_stale_claim_reclaimed_after_ten_minutes(self):
+        events = _table()
+        events.insert.return_value.execute = MagicMock(
+            side_effect=Exception('duplicate key value violates unique '
+                                  'constraint "webhook_events_payload_hash_key"'))
+        events.select.return_value.eq.return_value.maybeSingle \
+            .return_value.execute.return_value = MagicMock(data={
+                'received_at': (datetime.now(timezone.utc)
+                                - timedelta(minutes=20)).isoformat()})
+        payments = _table([{
+            'provider_request_id': 'pr-9', 'registration_id': 'reg-1',
+            'organizer_id': None, 'status': 'pending',
+            'created_at': '2026-10-17T00:00:00Z',
+        }])
+        sb = _mock_sb(payments=payments, webhook_events=events)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.get_payment_request',
+                   return_value={'id': 'pr-9', 'status': 'expired'}):
+            call_command('reconcile_payments')
+        eqs = [c.args for c in events.delete.return_value.eq.call_args_list]
+        claim_hash = hashlib.sha256(b'reconcile:pr-9').hexdigest()
+        assert ('payload_hash', claim_hash) in eqs  # orphaned claim removed
+        assert payments.update.call_count == 1  # row was re-polled + recorded
+
+    def test_fresh_claim_still_skipped(self):
+        events = _table()
+        events.insert.return_value.execute = MagicMock(
+            side_effect=Exception('duplicate key value violates unique '
+                                  'constraint "webhook_events_payload_hash_key"'))
+        events.select.return_value.eq.return_value.maybeSingle \
+            .return_value.execute.return_value = MagicMock(data={
+                'received_at': (datetime.now(timezone.utc)
+                                - timedelta(minutes=1)).isoformat()})
+        payments = _table([{
+            'provider_request_id': 'pr-9', 'registration_id': 'reg-1',
+            'organizer_id': None, 'status': 'pending',
+            'created_at': '2026-10-17T00:00:00Z',
+        }])
+        sb = _mock_sb(payments=payments, webhook_events=events)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.get_payment_request',
+                   return_value={'id': 'pr-9', 'status': 'expired'}):
+            call_command('reconcile_payments')
+        assert payments.update.call_count == 0  # skipped this run
+        assert events.delete.return_value.eq.call_count == 0
+
+    def test_claim_queries_are_scoped_to_reconcile_hash(self):
+        """Real webhook rows must never be TTL-deleted: every webhook_events
+        delete from reconcile is scoped by the exact claim payload_hash."""
+        events = _table()
+        events.insert.return_value.execute = MagicMock(
+            side_effect=Exception('duplicate key value violates unique '
+                                  'constraint "webhook_events_payload_hash_key"'))
+        events.select.return_value.eq.return_value.maybeSingle \
+            .return_value.execute.return_value = MagicMock(data={
+                'received_at': (datetime.now(timezone.utc)
+                                - timedelta(minutes=20)).isoformat()})
+        payments = _table([{
+            'provider_request_id': 'pr-9', 'registration_id': 'reg-1',
+            'organizer_id': None, 'status': 'pending',
+            'created_at': '2026-10-17T00:00:00Z',
+        }])
+        sb = _mock_sb(payments=payments, webhook_events=events)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.get_payment_request',
+                   return_value={'id': 'pr-9', 'status': 'expired'}):
+            call_command('reconcile_payments')
+        claim_hash = hashlib.sha256(b'reconcile:pr-9').hexdigest()
+        for c in events.delete.return_value.eq.call_args_list:
+            assert c.args == ('payload_hash', claim_hash)
+        # the staleness lookup is hash-scoped too, not event_type-wide
+        assert events.select.return_value.eq.call_args_list[-1].args == \
+            ('payload_hash', claim_hash)
