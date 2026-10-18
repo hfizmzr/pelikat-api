@@ -71,6 +71,10 @@ DOCUMENT_ENCRYPTION_KEY = os.environ.get('DOCUMENT_ENCRYPTION_KEY', '')
 HITPAY_API_URL = os.environ.get('HITPAY_API_URL', '')
 HITPAY_API_KEY = os.environ.get('HITPAY_API_KEY', '')
 HITPAY_WEBHOOK_SALT = os.environ.get('HITPAY_WEBHOOK_SALT', '')
+# Optional: force-enable specific HitPay rails, comma-separated
+# (e.g. grabpay_direct,shopee_pay,atome). Empty = let the merchant
+# Dashboard's toggled-on rails govern (payment_methods omitted from payload).
+HITPAY_PAYMENT_METHODS = os.environ.get('HITPAY_PAYMENT_METHODS', '')
 
 _AI_PHOTOS_YOLO_MODEL_PATH = os.environ.get('AI_PHOTOS_YOLO_MODEL_PATH')
 AI_PHOTOS_YOLO_MODEL_PATH = str(

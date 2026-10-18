@@ -267,10 +267,25 @@ def create_payment(data: dict) -> tuple[int, dict]:
         return 422, {'error': 'Amount mismatch with server-side price'}
 
     amount = server_amount if server_amount is not None else client_amount
-    currency = data.get('currency', 'MYR')
-    payment_methods = data.get('payment_methods') or [
-        'fpx', 'duitnow', 'grabpay_direct', 'shopee_pay', 'touch_n_go',
-    ]
+    currency = (data.get('currency') or 'MYR').strip().upper()
+    if len(currency) != 3 or not currency.isalpha():
+        return 422, {'error': 'Invalid currency'}
+
+    # payment_methods: OMIT by default — HitPay then uses every rail toggled
+    # ON in the merchant Dashboard (strict per-element validation rejects the
+    # whole request if any one element isn't currently enabled). The key is
+    # only sent when HITPAY_PAYMENT_METHODS or the caller provides non-empty
+    # methods, comma-separated, trimmed, lowercased to HitPay enums.
+    env_methods_raw = settings.HITPAY_PAYMENT_METHODS
+    caller_methods_raw = data.get('payment_methods')
+    if env_methods_raw.strip():
+        methods_source = env_methods_raw
+    elif isinstance(caller_methods_raw, (list, tuple)):
+        methods_source = ','.join(str(m) for m in caller_methods_raw)
+    else:
+        methods_source = str(caller_methods_raw or '').strip()
+    payment_methods = [m.strip().lower() for m in methods_source.split(',')
+                       if m.strip()]
 
     payload = {
         'amount': f'{amount:.2f}',

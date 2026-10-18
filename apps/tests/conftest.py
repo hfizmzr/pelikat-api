@@ -18,6 +18,7 @@ def setup_test_env():
     os.environ['HITPAY_API_URL'] = 'https://api.sandbox.hit-pay.com/v1'
     os.environ['HITPAY_API_KEY'] = 'test-hitpay-key'
     os.environ['HITPAY_WEBHOOK_SALT'] = 'test-webhook-salt'
+    os.environ['HITPAY_PAYMENT_METHODS'] = ''
 
     # Reload settings
     from django.conf import settings as django_settings

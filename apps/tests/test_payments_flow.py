@@ -154,7 +154,78 @@ class TestCreatePayment:
         assert payload['allow_repeated_payments'] == 'false'
         assert 'webhook' not in payload
         assert payload['amount'] == '50.00'
-        assert any(k.startswith('payment_methods') for k in payload)
+        assert payload['currency'] == 'MYR'
+        assert not any(k.startswith('payment_methods') for k in payload)
+
+    def test_create_env_override_sends_payment_methods(self, api_client):
+        """HITPAY_PAYMENT_METHODS override → indexed form keys, normalized."""
+        reg = _table([{'category_id': 'cat-1'}])
+        cat = _table([{'price': '50.00'}])
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(registrations=reg, race_categories=cat,
+                                         payments=_table())), \
+             patch.object(services.settings, 'HITPAY_PAYMENT_METHODS',
+                          'GrabPay_Direct, shopee_pay'), \
+             patch('apps.payments.services.create_payment_request',
+                   return_value={'id': 'pr-9', 'url': 'https://x',
+                                 'status': 'pending'}) as mock_create:
+            api_client.post('/payments/create', data=self._payload(),
+                            content_type='application/json', **_auth())
+        payload = mock_create.call_args.args[0]
+        assert payload['payment_methods[0]'] == 'grabpay_direct'
+        assert payload['payment_methods[1]'] == 'shopee_pay'
+
+    def test_create_caller_supplied_methods_passed_through(self, api_client):
+        reg = _table([{'category_id': 'cat-1'}])
+        cat = _table([{'price': '50.00'}])
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(registrations=reg, race_categories=cat,
+                                         payments=_table())), \
+             patch('apps.payments.services.create_payment_request',
+                   return_value={'id': 'pr-9', 'url': 'https://x',
+                                 'status': 'pending'}) as mock_create:
+            api_client.post(
+                '/payments/create',
+                data={**self._payload(), 'payment_methods': ['duitnow']},
+                content_type='application/json', **_auth(),
+            )
+        payload = mock_create.call_args.args[0]
+        assert payload['payment_methods[0]'] == 'duitnow'
+        assert payload['generate_qr'] == 'true'  # single QR-capable rail
+
+    def test_create_caller_empty_methods_omitted(self, api_client):
+        reg = _table([{'category_id': 'cat-1'}])
+        cat = _table([{'price': '50.00'}])
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(registrations=reg, race_categories=cat,
+                                         payments=_table())), \
+             patch('apps.payments.services.create_payment_request',
+                   return_value={'id': 'pr-9', 'url': 'https://x',
+                                 'status': 'pending'}) as mock_create:
+            api_client.post(
+                '/payments/create',
+                data={**self._payload(), 'payment_methods': []},
+                content_type='application/json', **_auth(),
+            )
+        assert not any(k.startswith('payment_methods')
+                       for k in mock_create.call_args.args[0])
+
+    def test_create_rejects_non_iso_currency(self, api_client):
+        """A bad currency answers 422 to the caller instead of a HitPay crash."""
+        reg = _table([{'category_id': 'cat-1'}])
+        cat = _table([{'price': '50.00'}])
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(registrations=reg, race_categories=cat,
+                                         payments=_table())), \
+             patch('apps.payments.services.create_payment_request') as mock_create:
+            response = api_client.post(
+                '/payments/create',
+                data={**self._payload(), 'currency': 'XX'},
+                content_type='application/json', **_auth(),
+            )
+        assert response.status_code == 422
+        assert 'currency' in response.json()['error'].lower()
+        mock_create.assert_not_called()
 
     def test_create_subscription_uses_client_amount(self, api_client):
         """organizer_subscription has no server-side price source."""
