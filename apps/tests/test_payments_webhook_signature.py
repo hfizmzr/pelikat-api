@@ -216,6 +216,32 @@ class TestWebhookEventTypeHeaderContract:
         update_kwargs = mock_sb.table.return_value.update.call_args.args[0]
         assert update_kwargs['status'] == 'failed'
 
+    def test_short_completed_with_payment_request_object_confirms(self, api_client):
+        """Bare 'completed' with object 'payment_request' re-scopes to confirm."""
+        mock_sb = MagicMock()
+        body = _pr_body()  # already carries object: 'payment_request'
+        response = self._post(api_client, mock_sb, body, 'completed')
+        assert response.status_code == 200
+        mock_sb.rpc.assert_called_once_with(
+            'confirm_payment',
+            {
+                'p_provider_request_id': 'pr-123',
+                'p_provider_payment_id': 'pay-1',
+                'p_rail': 'grabpay_direct',
+            },
+        )
+
+    def test_dotless_event_without_pr_object_noops(self, api_client):
+        """Bare 'completed' without object: 'payment_request' must NOT be
+        re-scoped — the event is no-op'd, no confirm_payment call."""
+        mock_sb = MagicMock()
+        body = json.dumps({
+            'id': 'ch-1', 'object': 'charge', 'status': 'completed',
+        }).encode()
+        response = self._post(api_client, mock_sb, body, 'completed')
+        assert response.status_code == 200
+        mock_sb.rpc.assert_not_called()
+
     def test_dotted_event_type_still_confirms(self, api_client):
         """The legacy dotted form must keep working after normalization."""
         mock_sb = MagicMock()

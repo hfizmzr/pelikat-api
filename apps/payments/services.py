@@ -158,7 +158,8 @@ def handle_webhook(raw_body: bytes, signature: str, event_type: str) -> tuple[in
     # normalize so both hit the same branch (live-sandbox observed 2026-10-18).
     normalized_event = (event_type or '').strip().lower()
     if normalized_event and '.' not in normalized_event:
-        normalized_event = f'payment_request.{normalized_event}'
+        if data.get('object') == 'payment_request':
+            normalized_event = f'payment_request.{normalized_event}'
 
     try:
         _handle_verified_event(sb, normalized_event, data)
