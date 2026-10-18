@@ -178,6 +178,54 @@ class TestHitpayWebhookSignature:
 
 
 @pytest.mark.security
+class TestWebhookEventTypeHeaderContract:
+    """Live sandbox/webhooks send the short event name ('completed',
+    'failed') in Hitpay-Event-Type, not the dotted
+    'payment_request.completed' form — both must trigger the same action."""
+
+    def _post(self, api_client, mock_sb, body, event):
+        with patch('apps.payments.services.get_sb', return_value=mock_sb):
+            return api_client.post(
+                WEBHOOK_PATH, data=body, content_type='application/json',
+                HTTP_HITPAY_SIGNATURE=_sign(body),
+                HTTP_HITPAY_EVENT_TYPE=event,
+            )
+
+    def test_short_completed_event_confirms_payment(self, api_client):
+        """Reproduced live: header 'completed' must call confirm_payment."""
+        mock_sb = MagicMock()
+        body = _pr_body()
+        response = self._post(api_client, mock_sb, body, 'completed')
+        assert response.status_code == 200
+        mock_sb.rpc.assert_called_once_with(
+            'confirm_payment',
+            {
+                'p_provider_request_id': 'pr-123',
+                'p_provider_payment_id': 'pay-1',
+                'p_rail': 'grabpay_direct',
+            },
+        )
+
+    def test_short_failed_event_records_failure(self, api_client):
+        mock_sb = MagicMock()
+        body = _pr_body(status='failed', payment_id=None)
+        response = self._post(api_client, mock_sb, body, 'failed')
+        assert response.status_code == 200
+        mock_sb.rpc.assert_not_called()
+        mock_sb.table.assert_any_call('payments')
+        update_kwargs = mock_sb.table.return_value.update.call_args.args[0]
+        assert update_kwargs['status'] == 'failed'
+
+    def test_dotted_event_type_still_confirms(self, api_client):
+        """The legacy dotted form must keep working after normalization."""
+        mock_sb = MagicMock()
+        response = self._post(api_client, mock_sb, _pr_body(),
+                              'payment_request.completed')
+        assert response.status_code == 200
+        mock_sb.rpc.assert_called_once()
+
+
+@pytest.mark.security
 class TestWebhookSignatureNormalization:
     """L3: hex digests are case-insensitive; whitespace must not matter."""
 

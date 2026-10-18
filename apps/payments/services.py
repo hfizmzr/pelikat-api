@@ -153,8 +153,15 @@ def handle_webhook(raw_body: bytes, signature: str, event_type: str) -> tuple[in
             return 200, {'status': 'duplicate'}
         raise
 
+    # HitPay sends the event name as either the dotted form
+    # ('payment_request.completed') or the bare kind ('completed') —
+    # normalize so both hit the same branch (live-sandbox observed 2026-10-18).
+    normalized_event = (event_type or '').strip().lower()
+    if normalized_event and '.' not in normalized_event:
+        normalized_event = f'payment_request.{normalized_event}'
+
     try:
-        _handle_verified_event(sb, event_type, data)
+        _handle_verified_event(sb, normalized_event, data)
     except Exception:
         # H1: the dedupe row already exists, so a 500 here would swallow the
         # verified event forever (the redelivery would hit the payload_hash
