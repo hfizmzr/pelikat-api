@@ -520,6 +520,16 @@ def reconcile_stale_payments() -> dict:
                     'p_provider_payment_id': succeeded.get('id') if succeeded else None,
                     'p_rail': succeeded.get('payment_type') if succeeded else None,
                 }).execute()
+                # W2: the charge reference is now known (confirm_payment wrote
+                # provider_payment_id), so a stuck 'no_charge_reference' marker
+                # must be released — otherwise refunds 409 forever. Guarded:
+                # H2 'refund_in_progress' / 'manual_disbursement' markers stay.
+                if succeeded and succeeded.get('id'):
+                    sb.table('payments').update({
+                        'refund_blocked_reason': None,
+                    }).eq('provider_request_id', provider_request_id) \
+                      .eq('refund_blocked_reason', 'no_charge_reference') \
+                      .execute()
                 summary['completed'] += 1
             elif status in ('failed', 'expired', 'canceled'):
                 sb.table('payments').update({'status': status}) \
@@ -534,6 +544,7 @@ def reconcile_stale_payments() -> dict:
                     'hitpay_status': status,
                 },
             }).execute()
+
         except Exception:
             # Release the claim so the next run retries this row.
             logger.exception('Reconcile processing failed for %s — releasing claim',

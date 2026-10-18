@@ -454,3 +454,60 @@ class TestReconcileCommand:
             call_command('reconcile_payments')
         assert mock_get.call_count == 1
         assert payments.update.call_count == 1  # no re-record on the 2nd run
+
+
+@pytest.mark.reliability
+class TestReconcileMarkerRelease:
+    def _stale_pending(self):
+        return _table([{
+            'provider_request_id': 'pr-9',
+            'registration_id': 'reg-1',
+            'organizer_id': None,
+            'status': 'pending',
+            'created_at': '2026-10-17T00:00:00Z',
+        }])
+
+    def test_completed_releases_no_charge_reference_marker(self):
+        """W2: on a completed poll (charge reference now known), a stuck
+        'no_charge_reference' marker must be cleared so refunds un-409."""
+        payments = self._stale_pending()
+        sb = _mock_sb(payments=payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.get_payment_request',
+                   return_value={'id': 'pr-9', 'status': 'completed',
+                                 'payments': [{'id': 'pay-1', 'status': 'succeeded',
+                                               'payment_type': 'fpx'}]}):
+            call_command('reconcile_payments')
+        marker_clears = [
+            c for c in payments.update.call_args_list
+            if c.args[0].get('refund_blocked_reason') is None
+        ]
+        assert len(marker_clears) == 1
+        # Guarded: only the no_charge_reference marker may be cleared. The
+        # clear chain is update(...).eq(provider_request_id).eq(refund_...).
+        chain = payments.update.return_value.eq.return_value
+        eq_guard = [c.args for c in chain.eq.call_args_list]
+        assert ('refund_blocked_reason', 'no_charge_reference') in eq_guard
+        eqs = [c.args for c in payments.update.return_value.eq.call_args_list]
+        # still targeted at the right payment row
+        assert ('provider_request_id', 'pr-9') in eqs
+
+    def test_manual_disbursement_marker_not_cleared(self):
+        """W2: an H2 'manual_disbursement' marker must never be released."""
+        payments = self._stale_pending()
+        sb = _mock_sb(payments=payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.get_payment_request',
+                   return_value={'id': 'pr-9', 'status': 'completed',
+                                 'payments': [{'id': 'pay-1', 'status': 'succeeded',
+                                               'payment_type': 'fpx'}]}):
+            call_command('reconcile_payments')
+        # No clearing update without the no_charge_reference guard: every
+        # refund_blocked_reason clearing update must be eq-guarded.
+        for c in payments.update.call_args_list:
+            if c.args[0].get('refund_blocked_reason') is None:
+                guard = [
+                    e.args for e in
+                    payments.update.return_value.eq.return_value.eq.call_args_list
+                ]
+                assert ('refund_blocked_reason', 'no_charge_reference') in guard
