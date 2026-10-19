@@ -230,6 +230,26 @@ class TestCreatePayment:
         assert response.status_code == 409
         mock_create.assert_not_called()
 
+    def test_create_in_progress_claim_409(self, api_client):
+        """063 tri-state: an in_progress claim (a sentinel row exists from an
+        in-flight/crashed claim) → 409 fast-retry, never a second HitPay PR."""
+        reg = _table([{'category_id': 'cat-1'}])
+        cat = _table([{'price': '50.00'}])
+        sb = _mock_sb(registrations=reg, race_categories=cat, payments=_table())
+        sb.rpc.return_value.execute.return_value = MagicMock(
+            data=[{'provider_request_id': None, 'is_reservation': False,
+                   'in_progress': True}])
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.create_payment_request') as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(),
+                content_type='application/json', **_auth(),
+            )
+        assert response.status_code == 409
+        assert response.json()['error'] == \
+            'Checkout already initializing; retry in a few seconds'
+        mock_create.assert_not_called()
+
     def test_create_sends_expected_hitpay_fields(self, api_client):
         """Form payload: send_sms=false, allow_repeated_payments=false,
         reference_number=registration_id, no deprecated webhook field."""
@@ -742,14 +762,18 @@ class TestReconcileClaimLifecycle:
         assert payments.update.call_count == 1  # row was re-polled + recorded
 
     def test_fresh_claim_still_skipped(self):
-        events = _table()
+        """The spec'd supabase-py probe chain is wired onto the mock
+        Supabase's webhook_events table and passes through
+        _reconcile_claim_orphaned: a fresh claim is skipped this run."""
+        events = MagicMock()
         events.insert.return_value.execute = MagicMock(
             side_effect=Exception('duplicate key value violates unique '
                                   'constraint "webhook_events_payload_hash_key"'))
-        events.select.return_value.eq.return_value.maybe_single \
-            .return_value.execute.return_value = MagicMock(data={
-                'received_at': (datetime.now(timezone.utc)
-                                - timedelta(minutes=1)).isoformat()})
+        probe = events.select.return_value.eq.return_value = MagicMock(
+            spec=['maybe_single'])
+        probe.maybe_single.return_value.execute.return_value = MagicMock(data={
+            'received_at': (datetime.now(timezone.utc)
+                            - timedelta(minutes=1)).isoformat()})
         payments = _table([{
             'provider_request_id': 'pr-9', 'registration_id': 'reg-1',
             'organizer_id': None, 'status': 'pending',
@@ -760,6 +784,7 @@ class TestReconcileClaimLifecycle:
              patch('apps.payments.services.get_payment_request',
                    return_value={'id': 'pr-9', 'status': 'expired'}):
             call_command('reconcile_payments')
+        assert probe.maybe_single.called  # wired chain is exercised
         assert payments.update.call_count == 0  # skipped this run
         assert events.delete.return_value.eq.call_count == 0
 
@@ -797,30 +822,51 @@ class TestReconcileClaimProbe:
     """Pin the supabase-py method-name bug class: the claim-staleness probe
     must use `maybe_single()` (supabase-py) — NOT `maybeSingle()` (the JS
     name, which AttributeError-crashed the handler and killed reconcile on
-    ANY claim conflict)."""
+    ANY claim conflict). The probe chain is wired onto the mock Supabase's
+    webhook_events table and exercised through `_reconcile_claim_orphaned`,
+    so `maybe_single` being actually CALLED is asserted functionally."""
 
     def _spec_events(self):
-        # spec_set: only the real supabase-py chain exists; maybeSingle
-        # would raise AttributeError instead of silently passing.
+        # spec_set-style: only the real supabase-py chain exists on the
+        # probe node; maybeSingle would raise AttributeError instead of
+        # silently passing.
         t = MagicMock()
         t.select.return_value.eq.return_value = MagicMock(
             spec=['maybe_single'])
         return t
 
-    def test_chain_uses_supabase_py_maybe_single(self):
+    def _wired_sb(self, execute_return=None):
+        """Spec'd supabase-py probe chain wired onto the mock Supabase's
+        webhook_events table (used through reconcile / _reconcile_claim_orphaned).
+        `execute_return` is whatever the probe's execute() yields."""
         events = self._spec_events()
-        assert hasattr(events.select.return_value.eq.return_value,
-                       'maybe_single')
+        probe = events.select.return_value.eq.return_value
+        probe.maybe_single.return_value.execute.return_value = execute_return
+        return _mock_sb(webhook_events=events), events, probe
+
+    def test_chain_uses_supabase_py_maybe_single(self):
+        """Functional pin: the wired probe chain actually calls
+        supabase-py's maybe_single() (never the JS-name maybeSingle)."""
+        sb, events, probe = self._wired_sb(MagicMock(data=None))
+        from apps.payments.services import _reconcile_claim_orphaned
+        assert _reconcile_claim_orphaned(sb, 'hash-x') is False
+        assert probe.maybe_single.called
         with pytest.raises(AttributeError):
-            events.select.return_value.eq.return_value.maybeSingle  # noqa: B018
+            probe.maybeSingle  # noqa: B018
 
     def test_maybe_single_null_row_is_not_orphaned(self):
         """A None row (claim absent) is conservatively NOT orphaned."""
-        events = self._spec_events()
-        events.select.return_value.eq.return_value.maybe_single \
-            .return_value.execute.return_value = MagicMock(data=None)
+        sb, _, _ = self._wired_sb(MagicMock(data=None))
         from apps.payments.services import _reconcile_claim_orphaned
-        assert _reconcile_claim_orphaned(events, 'hash-x') is False
+        assert _reconcile_claim_orphaned(sb, 'hash-x') is False
+
+    def test_maybe_single_none_result_is_not_orphaned(self):
+        """execute() returning None → treated as empty/unknown age → the
+        conservative no-op (decline allegation), no crash."""
+        sb, _, probe = self._wired_sb(None)
+        from apps.payments.services import _reconcile_claim_orphaned
+        assert _reconcile_claim_orphaned(sb, 'hash-x') is False
+        assert probe.maybe_single.called
 
 
 
@@ -876,6 +922,8 @@ class TestRefundRemainingAndUnknown:
         assert payments.update.call_args.args[0]['refunded_amount'] == '10.00'
 
     def test_refund_over_remaining_422(self):
+        """Post-claim validation: the fresh refunded_amount is authoritative.
+        The claim is won, then released again after the over-refund 422."""
         payments = self._payments(self._row(refunded_amount='6.00'))
         with patch('apps.payments.services.get_sb',
                    return_value=_mock_sb(payments=payments)), \
@@ -884,7 +932,59 @@ class TestRefundRemainingAndUnknown:
         assert status == 422
         assert 'remaining' in body['error']
         mock_refund.assert_not_called()
-        payments.update.assert_not_called()  # no claim ever locked
+        # Claim cleared again (guarded inverse of the claim update).
+        updates = [c.args[0] for c in payments.update.call_args_list]
+        assert {'refund_blocked_reason': None} in updates
+
+    def test_refund_post_claim_validation_reads_fresh_refunded_amount(self):
+        """Refund race: a concurrent winner that bumped refunded_amount between
+        our initial read and our claim must not be double-charged — the
+        post-claim fresh read is validated, so the second refund 422s instead
+        of forwarding to HitPay (simulated concurrency: sequential calls whose
+        select chain returns the freshly-updated row)."""
+        row_first = self._row(refunded_amount='0')
+        row_after = self._row(refunded_amount='10.00')
+        payments = _table([row_first])
+        select_exec = MagicMock(side_effect=[
+            MagicMock(data=[row_first]),   # call 1: initial read
+            MagicMock(data=[row_first]),   # call 1: post-claim fresh read
+            MagicMock(data=[row_after]),   # call 2: initial read (fresh row)
+            MagicMock(data=[row_after]),   # call 2: post-claim fresh read
+        ])
+        payments.select.return_value.eq.return_value.limit.return_value.execute \
+            = select_exec
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(payments=payments)), \
+             patch('apps.payments.services.create_refund',
+                   return_value={'id': 'r-1'}) as mock_refund:
+            first = services.refund_payment('pr-9', '10.00')
+            second = services.refund_payment('pr-9', '5.00')
+        assert first[0] == 200
+        assert second[0] == 422
+        assert 'remaining' in second[1]['error']
+        assert mock_refund.call_count == 1
+        # HitPay was only ever invoked with the first claim's validated amount
+        mock_refund.assert_called_once_with('pay-1', '10.00')
+        # the first refund's cumulative write and the second's claim release
+        updates = [c.args[0] for c in payments.update.call_args_list]
+        assert [u.get('refunded_amount') for u in updates
+                if 'refunded_amount' in u] == ['10.00']
+        assert updates[-1] == {'refund_blocked_reason': None}
+
+    def test_refund_claim_released_on_post_claim_validation_failure(self):
+        """A post-claim validation failure clears the refund_in_progress
+        marker so the slot stays refundable for a corrected retry."""
+        payments = self._payments(self._row(refunded_amount='10.00'))
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(payments=payments)), \
+             patch('apps.payments.services.create_refund') as mock_refund:
+            status, _ = services.refund_payment('pr-9', '5.00')
+        assert status == 422
+        mock_refund.assert_not_called()
+        chains = [c.args for c in
+                  payments.update.return_value.eq.call_args_list
+                  if c.args == ('provider_request_id', 'pr-9')]
+        assert chains  # the release targeted the claimed row
 
     def test_refund_unknown_outcome_keeps_claim_with_distinct_marker(self):
         """Timeout/transport/5xx: claim kept under 'refund_unknown' —

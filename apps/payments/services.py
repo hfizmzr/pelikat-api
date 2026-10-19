@@ -284,6 +284,14 @@ def create_payment(data: dict) -> tuple[int, dict]:
     }).execute()
     claim_rows = claim_result.data if isinstance(claim_result.data, list) else []
     claim_row = claim_rows[0] if claim_rows else None
+    if claim_row and claim_row.get('in_progress'):
+        # 063 tri-state: a sentinel row already exists from an in-flight or
+        # crashed claim (provider_request_id is NULL here) — never create a
+        # second HitPay PR for it.
+        return 409, {
+            'error': 'Checkout already initializing; retry in a few seconds',
+        }
+
     if not claim_row or not claim_row.get('provider_request_id'):
         logger.error('claim_payment_slot returned no slot (order_type=%s)',
                      order_type)
@@ -402,6 +410,21 @@ def get_payment_status(reference_number: str) -> tuple[int, dict]:
 
 # ── REFUND ───────────────────────────────────────────────────
 
+def _client_amount_prevalidated(amount: str | None) -> str | None:
+    """Numeric/positive-only pre-validation of a client refund amount (the
+    remaining-bound check needs the post-claim fresh row, so it happens
+    later). Returns constant error text or None when acceptable."""
+    if amount is None:
+        return None
+    try:
+        value = Decimal(str(amount))
+    except InvalidOperation:
+        return 'Refund amount must be a number'
+    if not value.is_finite() or value <= 0:
+        return 'Refund amount must be greater than zero'
+    return None
+
+
 def _validated_refund_amount(amount: str | None, stored_amount: str,
                              refunded_amount) -> tuple[str | None, str | None]:
     """M3 + 062 hardening: a client-supplied amount must be numeric and
@@ -462,10 +485,12 @@ def refund_payment(provider_request_id: str, amount: str | None) -> tuple[int, d
             'refund_blocked_reason': 'no_charge_reference',
         }
 
-    refund_amount, amount_error = _validated_refund_amount(
-        amount, payment['amount'], payment.get('refunded_amount'))
-    if amount_error or refund_amount is None:
-        return 422, {'error': amount_error or 'Invalid refund amount'}
+    # M3 pre-validation before claiming: the client amount must be numeric,
+    # finite and > 0. The *remaining-bound* check needs a fresh refunds
+    # read, so it happens after the claim below.
+    amount_error = _client_amount_prevalidated(amount)
+    if amount_error:
+        return 422, {'error': amount_error}
 
     # H2: atomic double-refund guard. `status` is CHECK-constrained (there is
     # no 'refunding' value), so claim the row via the free-text
@@ -484,6 +509,25 @@ def refund_payment(provider_request_id: str, amount: str | None) -> tuple[int, d
             'error': 'already refunded or refund already in progress',
             'refund_blocked_reason': 'refund_in_progress',
         }
+
+    # CodeRabbit Major (refund race): the validation read must happen AFTER
+    # winning the claim — a concurrent winner may already have bumped
+    # refunded_amount before this request claimed the row. Re-fetch the
+    # freshly-claimed row and validate against *that* value.
+    fresh = (sb.table('payments').select('*')
+             .eq('provider_request_id', provider_request_id)
+             .limit(1).execute())
+    fresh_rows = fresh.data if isinstance(fresh.data, list) else []
+    payment = fresh_rows[0] if fresh_rows else payment
+    refund_amount, amount_error = _validated_refund_amount(
+        amount, payment['amount'], payment.get('refunded_amount'))
+    if amount_error or refund_amount is None:
+        # Validation failed post-claim — release the claim (inverse of the
+        # guarded update above) and never forward to HitPay.
+        sb.table('payments').update({'refund_blocked_reason': None}) \
+            .eq('provider_request_id', provider_request_id) \
+            .eq('refund_blocked_reason', 'refund_in_progress').execute()
+        return 422, {'error': amount_error or 'Invalid refund amount'}
 
     try:
         refund = create_refund(payment['provider_payment_id'], refund_amount)
@@ -564,11 +608,14 @@ def _reconcile_claim_orphaned(sb, claim_hash: str) -> bool:
     Scoped by the exact claim payload_hash — real webhook event rows are
     never inspected or touched by this.
     """
-    row = (sb.table('webhook_events').select('received_at')
-           .eq('payload_hash', claim_hash)
-           .maybe_single().execute())
-    # Null-guard: no row (or non-dict payload) → can't verify age.
-    data = row.data if isinstance(row.data, dict) else {}
+    # Null-guard: the execute() result itself may be None (unknown) — treat
+    # as an empty read → conservative no-op. Also no row (or non-dict
+    # payload) → can't verify age.
+    result = (sb.table('webhook_events').select('received_at')
+              .eq('payload_hash', claim_hash)
+              .maybe_single().execute())
+    data = getattr(result, 'data', None)
+    data = data if isinstance(data, dict) else {}
     received = data.get('received_at')
     if not isinstance(received, str):
         return False  # can't verify age → keep the conservative skip
