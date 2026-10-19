@@ -40,12 +40,37 @@ def _mock_sb(**tables):
 
 def _pending_payment_table(rows):
     """Payments table whose select chain mirrors the create-idempotency lookup:
-    select(*).eq(order_type).eq(key).order(created_at).limit(1).execute()."""
+    select(*).eq(provider_request_id).limit(1).execute()."""
     t = MagicMock()
-    (t.select.return_value.eq.return_value.eq.return_value
-       .order.return_value.limit.return_value.execute.return_value) = \
+    t.select.return_value.eq.return_value.limit.return_value.execute.return_value = \
         MagicMock(data=rows)
     return t
+
+
+CLAIM_NEW = [{
+    'provider_request_id': 'pending:abc-def',
+    'is_reservation': True,
+}]
+
+
+def _claim_sb(**tables):
+    """Mock Supabase client whose claim_payment_slot RPC grants a fresh
+    reservation slot (062 contract)."""
+    sb = _mock_sb(**tables)
+    sb.rpc.return_value.execute.return_value = MagicMock(
+        data=[{'provider_request_id': 'pending:abc-def',
+               'is_reservation': True}])
+    return sb
+
+
+def _claim_existing_sb(provider_request_id, **tables):
+    """Mock Supabase client whose claim_payment_slot reports an existing
+    (non-reservation) pending row for this order."""
+    sb = _mock_sb(**tables)
+    sb.rpc.return_value.execute.return_value = MagicMock(
+        data=[{'provider_request_id': provider_request_id,
+               'is_reservation': False}])
+    return sb
 
 
 def _auth(**extra):
@@ -83,7 +108,8 @@ class TestPaymentsMiddleware:
 
 @pytest.mark.reliability
 class TestCreatePayment:
-    """Server-side price snapshot and HitPay payload construction."""
+    """Server-side price snapshot, 062 claim-serialization and HitPay payload
+    construction."""
 
     def _payload(self, amount='50.00'):
         return {
@@ -97,44 +123,112 @@ class TestCreatePayment:
             'redirect_url': 'https://web.example.com/runner/payment?reg=x',
         }
 
-    def test_create_rejects_amount_mismatch(self, api_client):
-        """Client amount deviating from race_categories.price is rejected."""
-        reg = _table([{'category_id': 'cat-1'}])
-        cat = _table([{'price': '50.00'}])
+    def test_create_ignores_client_amount_and_rejects_unpriced_order(self, api_client):
+        """The caller's amount is never trusted: a registration derives its
+        price server-side. A missing/zero server price → 422 Invalid amount,
+        no HitPay call."""
         with patch('apps.payments.services.get_sb',
-                   return_value=_mock_sb(registrations=reg, race_categories=cat)):
+                   return_value=_mock_sb(registrations=_table([]),
+                                         race_categories=_table([]))), \
+             patch('apps.payments.services.create_payment_request') as mock_create:
             response = api_client.post(
                 '/payments/create', data=self._payload(amount='60.00'),
                 content_type='application/json', **_auth(),
             )
         assert response.status_code == 422
-        assert 'mismatch' in response.json()['error'].lower()
+        assert response.json()['error'] == 'Invalid amount'
+        mock_create.assert_not_called()
 
-    def test_create_snapshots_server_price(self, api_client):
-        """The payments row stores the server-side price, not a client value."""
+    def test_create_server_price_wins_over_client_amount(self, api_client):
+        """A lying or stale client amount cannot shift the charge —
+        race_categories.price wins."""
         reg = _table([{'category_id': 'cat-1'}])
         cat = _table([{'price': '50.00'}])
         payments = _table()
-        with patch('apps.payments.services.get_sb',
-                   return_value=_mock_sb(registrations=reg, race_categories=cat,
-                                         payments=payments)), \
+        sb = _claim_sb(registrations=reg, race_categories=cat, payments=payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
              patch('apps.payments.services.create_payment_request',
-                   return_value={'id': 'pr-9', 'url': 'https://checkout.hit-pay.com/x',
+                   return_value={'id': 'pr-9', 'url': 'https://x',
+                                 'status': 'pending'}) as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(amount='1.99'),
+                content_type='application/json', **_auth(),
+            )
+        assert response.status_code == 201
+        assert mock_create.call_args.args[0]['amount'] == '50.00'
+
+    def test_create_claim_runs_and_swaps_sentinel(self, api_client):
+        """062: claim_payment_slot runs first; the reservation row's
+        pending:<uuid> sentinel is replaced with the real PR id on success
+        via a guarded update (no insert path remains)."""
+        reg = _table([{'category_id': 'cat-1'}])
+        cat = _table([{'price': '50.00'}])
+        payments = _table()
+        sb = _claim_sb(registrations=reg, race_categories=cat, payments=payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.create_payment_request',
+                   return_value={'id': 'pr-9', 'url': 'https://x',
                                  'status': 'pending'}):
+            response = api_client.post(
+                '/payments/create', data=self._payload(amount='50.00'),
+                content_type='application/json', **_auth(),
+            )
+        assert response.status_code == 201
+        name, params = sb.rpc.call_args.args
+        assert name == 'claim_payment_slot'
+        assert params['p_amount'] == '50.00'
+        assert params['p_currency'] == 'MYR'
+        payments.insert.assert_not_called()
+        update = payments.update.call_args.args[0]
+        assert update['provider_request_id'] == 'pr-9'
+        assert update['status'] == 'pending'
+
+    def test_create_reservation_update_targets_sentinel_row(self, api_client):
+        reg = _table([{'category_id': 'cat-1'}])
+        cat = _table([{'price': '50.00'}])
+        payments = _table()
+        sb = _claim_sb(registrations=reg, race_categories=cat, payments=payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.create_payment_request',
+                   return_value={'id': 'pr-9', 'url': 'https://x',
+                                 'status': 'pending'}):
+            api_client.post('/payments/create', data=self._payload(),
+                            content_type='application/json', **_auth())
+        eqs = [c.args for c in payments.update.return_value.eq.call_args_list]
+        assert ('provider_request_id', 'pending:abc-def') in eqs
+
+    def test_create_hitpay_failure_releases_reservation(self, api_client):
+        """062: a HitPay create failure deletes the sentinel reservation row —
+        the claim is released atomically and the next attempt starts fresh."""
+        payments = _table()
+        sb = _claim_sb(registrations=_table([{'category_id': 'c'}]),
+                       race_categories=_table([{'price': '50.00'}]),
+                       payments=payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.create_payment_request',
+                   side_effect=HitPayError('invalid amount', status=422)):
             response = api_client.post(
                 '/payments/create', data=self._payload(),
                 content_type='application/json', **_auth(),
             )
-        assert response.status_code == 201
-        body = response.json()
-        assert body['provider_request_id'] == 'pr-9'
-        assert body['checkout_url'] == 'https://checkout.hit-pay.com/x'
+        assert response.status_code == 422
+        eqs = [c.args for c in payments.delete.return_value.eq.call_args_list]
+        assert ('provider_request_id', 'pending:abc-def') in eqs
 
-        row = payments.insert.call_args.args[0]
-        assert row['amount'] == '50.00'
-        assert row['provider_request_id'] == 'pr-9'
-        assert row['status'] == 'pending'
-        assert row['order_type'] == 'registration'
+    def test_create_no_claim_slot_409(self, api_client):
+        """An empty claim (RPC grants nothing) → 409, no HitPay call."""
+        reg = _table([{'category_id': 'cat-1'}])
+        cat = _table([{'price': '50.00'}])
+        sb = _mock_sb(registrations=reg, race_categories=cat, payments=_table())
+        sb.rpc.return_value.execute.return_value = MagicMock(data=[])
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.create_payment_request') as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(),
+                content_type='application/json', **_auth(),
+            )
+        assert response.status_code == 409
+        mock_create.assert_not_called()
 
     def test_create_sends_expected_hitpay_fields(self, api_client):
         """Form payload: send_sms=false, allow_repeated_payments=false,
@@ -142,8 +236,8 @@ class TestCreatePayment:
         reg = _table([{'category_id': 'cat-1'}])
         cat = _table([{'price': '50.00'}])
         with patch('apps.payments.services.get_sb',
-                   return_value=_mock_sb(registrations=reg, race_categories=cat,
-                                         payments=_table())), \
+                   return_value=_claim_sb(registrations=reg, race_categories=cat,
+                                          payments=_table())), \
              patch('apps.payments.services.create_payment_request',
                    return_value={'id': 'pr-9', 'url': 'https://x', 'status': 'pending'}) as mock_create:
             api_client.post('/payments/create', data=self._payload(),
@@ -162,8 +256,8 @@ class TestCreatePayment:
         reg = _table([{'category_id': 'cat-1'}])
         cat = _table([{'price': '50.00'}])
         with patch('apps.payments.services.get_sb',
-                   return_value=_mock_sb(registrations=reg, race_categories=cat,
-                                         payments=_table())), \
+                   return_value=_claim_sb(registrations=reg, race_categories=cat,
+                                          payments=_table())), \
              patch.object(services.settings, 'HITPAY_PAYMENT_METHODS',
                           'GrabPay_Direct, shopee_pay'), \
              patch('apps.payments.services.create_payment_request',
@@ -179,8 +273,8 @@ class TestCreatePayment:
         reg = _table([{'category_id': 'cat-1'}])
         cat = _table([{'price': '50.00'}])
         with patch('apps.payments.services.get_sb',
-                   return_value=_mock_sb(registrations=reg, race_categories=cat,
-                                         payments=_table())), \
+                   return_value=_claim_sb(registrations=reg, race_categories=cat,
+                                          payments=_table())), \
              patch('apps.payments.services.create_payment_request',
                    return_value={'id': 'pr-9', 'url': 'https://x',
                                  'status': 'pending'}) as mock_create:
@@ -197,8 +291,8 @@ class TestCreatePayment:
         reg = _table([{'category_id': 'cat-1'}])
         cat = _table([{'price': '50.00'}])
         with patch('apps.payments.services.get_sb',
-                   return_value=_mock_sb(registrations=reg, race_categories=cat,
-                                         payments=_table())), \
+                   return_value=_claim_sb(registrations=reg, race_categories=cat,
+                                          payments=_table())), \
              patch('apps.payments.services.create_payment_request',
                    return_value={'id': 'pr-9', 'url': 'https://x',
                                  'status': 'pending'}) as mock_create:
@@ -215,8 +309,8 @@ class TestCreatePayment:
         reg = _table([{'category_id': 'cat-1'}])
         cat = _table([{'price': '50.00'}])
         with patch('apps.payments.services.get_sb',
-                   return_value=_mock_sb(registrations=reg, race_categories=cat,
-                                         payments=_table())), \
+                   return_value=_claim_sb(registrations=reg, race_categories=cat,
+                                          payments=_table())), \
              patch('apps.payments.services.create_payment_request') as mock_create:
             response = api_client.post(
                 '/payments/create',
@@ -228,10 +322,12 @@ class TestCreatePayment:
         mock_create.assert_not_called()
 
     def test_create_subscription_uses_client_amount(self, api_client):
-        """organizer_subscription has no server-side price source."""
+        """organizer_subscription has no server-side price source; the caller
+        amount is used but recorded via the claim, never trusted blindly
+        elsewhere."""
         payments = _table()
-        with patch('apps.payments.services.get_sb',
-                   return_value=_mock_sb(payments=payments)), \
+        sb = _claim_sb(payments=payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
              patch('apps.payments.services.create_payment_request',
                    return_value={'id': 'pr-sub', 'url': 'https://x', 'status': 'pending'}):
             response = api_client.post(
@@ -248,20 +344,51 @@ class TestCreatePayment:
                 content_type='application/json', **_auth(),
             )
         assert response.status_code == 201
-        row = payments.insert.call_args.args[0]
-        assert row['amount'] == '299.00'
-        assert row['order_type'] == 'organizer_subscription'
+        _, params = sb.rpc.call_args.args
+        assert params['p_amount'] == '299.00'
+        assert params['p_order_type'] == 'organizer_subscription'
+        payments.insert.assert_not_called()
+        row = payments.update.call_args.args[0]
+        assert row['provider_request_id'] == 'pr-sub'
+
+    def test_create_subscription_rejects_nonpositive_amount(self, api_client):
+        """062 hardening: subscription amounts must be positive — there is
+        never a zero/invalid-charge path."""
+        for bad in ('0', '-5', 'abc'):
+            with patch('apps.payments.services.get_sb',
+                       return_value=_mock_sb(payments=_table())), \
+                 patch('apps.payments.services.create_payment_request') as mock_create:
+                response = api_client.post(
+                    '/payments/create',
+                    data={
+                        'order_type': 'organizer_subscription',
+                        'organizer_id': '33333333-3333-3333-3333-333333333333',
+                        'amount': bad,
+                        'email': 'org@example.com', 'name': 'Organizer',
+                        'redirect_url': 'https://x',
+                    },
+                    content_type='application/json', **_auth(),
+                )
+            assert response.status_code == 422, bad
+            assert response.json()['error'] == 'Invalid amount'
+            mock_create.assert_not_called()
 
     def test_create_idempotent_returns_existing_pending_pr(self, api_client):
-        """M1: a pending payment for the same order must be reused, not
-        duplicated against the (rate-limited) HitPay create endpoint."""
+        """M1/062: an is_reservation=false claim (existing pending PR) answers
+        with the stored PR — re-fetched for a fresh checkout URL — and never
+        creates a duplicate request against the (rate-limited) HitPay create
+        endpoint."""
         payments = _pending_payment_table([{
             'provider_request_id': 'pr-old',
             'status': 'pending',
             'qr_code_data': {'qr_code': 'qr-1'},
         }])
         with patch('apps.payments.services.get_sb',
-                   return_value=_mock_sb(payments=payments)), \
+                   return_value=_claim_existing_sb(
+                       'pr-old',
+                       registrations=_table([{'category_id': 'cat-1'}]),
+                       race_categories=_table([{'price': '50.00'}]),
+                       payments=payments)), \
              patch('apps.payments.services.get_payment_request',
                    return_value={'id': 'pr-old', 'url': 'https://checkout.hit-pay.com/old',
                                  'status': 'pending',
@@ -278,29 +405,7 @@ class TestCreatePayment:
         assert body['qr_code'] == 'qr-1'
         assert body['status'] == 'pending'
         mock_create.assert_not_called()
-        payments.insert.assert_not_called()
-
-    def test_create_does_not_reuse_completed_payment(self, api_client):
-        """M1 only dedupes *pending* payments; a completed payment gets a new PR."""
-        reg = _table([{'category_id': 'cat-1'}])
-        cat = _table([{'price': '50.00'}])
-        payments = _pending_payment_table([{
-            'provider_request_id': 'pr-old',
-            'status': 'completed',
-            'qr_code_data': {'qr_code': 'qr-1'},
-        }])
-        with patch('apps.payments.services.get_sb',
-                   return_value=_mock_sb(registrations=reg,
-                                         race_categories=cat, payments=payments)), \
-             patch('apps.payments.services.get_payment_request') as mock_get, \
-             patch('apps.payments.services.create_payment_request',
-                   return_value={'id': 'pr-new', 'url': 'https://x', 'status': 'pending'}):
-            response = api_client.post(
-                '/payments/create', data=self._payload(),
-                content_type='application/json', **_auth(),
-            )
-        assert response.status_code == 201
-        mock_get.assert_not_called()
+        payments.update.assert_not_called()
 
 
 @pytest.mark.reliability
@@ -617,7 +722,7 @@ class TestReconcileClaimLifecycle:
         events.insert.return_value.execute = MagicMock(
             side_effect=Exception('duplicate key value violates unique '
                                   'constraint "webhook_events_payload_hash_key"'))
-        events.select.return_value.eq.return_value.maybeSingle \
+        events.select.return_value.eq.return_value.maybe_single \
             .return_value.execute.return_value = MagicMock(data={
                 'received_at': (datetime.now(timezone.utc)
                                 - timedelta(minutes=20)).isoformat()})
@@ -641,7 +746,7 @@ class TestReconcileClaimLifecycle:
         events.insert.return_value.execute = MagicMock(
             side_effect=Exception('duplicate key value violates unique '
                                   'constraint "webhook_events_payload_hash_key"'))
-        events.select.return_value.eq.return_value.maybeSingle \
+        events.select.return_value.eq.return_value.maybe_single \
             .return_value.execute.return_value = MagicMock(data={
                 'received_at': (datetime.now(timezone.utc)
                                 - timedelta(minutes=1)).isoformat()})
@@ -665,7 +770,7 @@ class TestReconcileClaimLifecycle:
         events.insert.return_value.execute = MagicMock(
             side_effect=Exception('duplicate key value violates unique '
                                   'constraint "webhook_events_payload_hash_key"'))
-        events.select.return_value.eq.return_value.maybeSingle \
+        events.select.return_value.eq.return_value.maybe_single \
             .return_value.execute.return_value = MagicMock(data={
                 'received_at': (datetime.now(timezone.utc)
                                 - timedelta(minutes=20)).isoformat()})
@@ -685,3 +790,149 @@ class TestReconcileClaimLifecycle:
         # the staleness lookup is hash-scoped too, not event_type-wide
         assert events.select.return_value.eq.call_args_list[-1].args == \
             ('payload_hash', claim_hash)
+
+
+@pytest.mark.reliability
+class TestReconcileClaimProbe:
+    """Pin the supabase-py method-name bug class: the claim-staleness probe
+    must use `maybe_single()` (supabase-py) — NOT `maybeSingle()` (the JS
+    name, which AttributeError-crashed the handler and killed reconcile on
+    ANY claim conflict)."""
+
+    def _spec_events(self):
+        # spec_set: only the real supabase-py chain exists; maybeSingle
+        # would raise AttributeError instead of silently passing.
+        t = MagicMock()
+        t.select.return_value.eq.return_value = MagicMock(
+            spec=['maybe_single'])
+        return t
+
+    def test_chain_uses_supabase_py_maybe_single(self):
+        events = self._spec_events()
+        assert hasattr(events.select.return_value.eq.return_value,
+                       'maybe_single')
+        with pytest.raises(AttributeError):
+            events.select.return_value.eq.return_value.maybeSingle  # noqa: B018
+
+    def test_maybe_single_null_row_is_not_orphaned(self):
+        """A None row (claim absent) is conservatively NOT orphaned."""
+        events = self._spec_events()
+        events.select.return_value.eq.return_value.maybe_single \
+            .return_value.execute.return_value = MagicMock(data=None)
+        from apps.payments.services import _reconcile_claim_orphaned
+        assert _reconcile_claim_orphaned(events, 'hash-x') is False
+
+
+
+@pytest.mark.reliability
+class TestRefundRemainingAndUnknown:
+    """062 hardening: cumulative refunded_amount + remaining validation; and
+    unknown-outcome refunds keep their claim under the refund_unknown marker."""
+
+    def _row(self, **over):
+        row = {
+            'provider_request_id': 'pr-9',
+            'provider_payment_id': 'pay-1',
+            'payment_rail': 'fpx',
+            'status': 'completed',
+            'amount': '10.00',
+            'refunded_amount': '0',
+            'registration_id': 'reg-1',
+        }
+        row.update(over)
+        return row
+
+    def _payments(self, row, claim=True):
+        t = _table([row])
+        if claim:
+            t.update.return_value.eq.return_value.in_.return_value \
+                .is_.return_value.execute.return_value = MagicMock(
+                    data=[{'id': 1}])
+        return t
+
+    def test_refund_partial_updates_cumulative_refunded_amount(self):
+        payments = self._payments(self._row(refunded_amount='4.00'))
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(payments=payments)), \
+             patch('apps.payments.services.create_refund',
+                   return_value={'id': 'r-1', 'status': 'succeeded'}) as mock_refund:
+            status, _ = services.refund_payment('pr-9', '3.00')
+        assert status == 200
+        mock_refund.assert_called_once_with('pay-1', '3.00')
+        update = payments.update.call_args.args[0]
+        assert update['status'] == 'partially_refunded'
+        assert update['refunded_amount'] == '7.00'
+        assert update['refund_blocked_reason'] is None
+
+    def test_refund_default_amount_is_remaining(self):
+        payments = self._payments(self._row(refunded_amount='4.00'))
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(payments=payments)), \
+             patch('apps.payments.services.create_refund',
+                   return_value={'id': 'r-1', 'status': 'succeeded'}):
+            status, _ = services.refund_payment('pr-9', None)
+        assert status == 200
+        assert payments.update.call_args.args[0]['status'] == 'refunded'
+        assert payments.update.call_args.args[0]['refunded_amount'] == '10.00'
+
+    def test_refund_over_remaining_422(self):
+        payments = self._payments(self._row(refunded_amount='6.00'))
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(payments=payments)), \
+             patch('apps.payments.services.create_refund') as mock_refund:
+            status, body = services.refund_payment('pr-9', '5.00')
+        assert status == 422
+        assert 'remaining' in body['error']
+        mock_refund.assert_not_called()
+        payments.update.assert_not_called()  # no claim ever locked
+
+    def test_refund_unknown_outcome_keeps_claim_with_distinct_marker(self):
+        """Timeout/transport/5xx: claim kept under 'refund_unknown' —
+        reconciliation resolves truth; never auto-refundable."""
+        for exc in (Exception('read timeout'),
+                    HitPayError('upstream exploded', status=503)):
+            payments = self._payments(self._row())
+            with patch('apps.payments.services.get_sb',
+                       return_value=_mock_sb(payments=payments)), \
+                 patch('apps.payments.services.create_refund', side_effect=exc):
+                status, body = services.refund_payment('pr-9', None)
+            assert status == 502
+            assert body == {'error': 'Refund failed at HitPay'}
+            update = payments.update.call_args.args[0]
+            assert update['refund_blocked_reason'] == 'refund_unknown'
+
+    def test_refund_hitpay_4xx_releases_claim(self):
+        payments = self._payments(self._row())
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(payments=payments)), \
+             patch('apps.payments.services.create_refund',
+                   side_effect=HitPayError('bad id', status=400)):
+            status, body = services.refund_payment('pr-9', None)
+        assert status == 502
+        # stable generic body: no exception detail leaks (CodeQL GAS 12)
+        assert body == {'error': 'Refund failed at HitPay'}
+        update = payments.update.call_args.args[0]
+        assert update.get('refund_blocked_reason') is None
+
+    def test_refund_completed_without_charge_reference_writes_no_marker(self):
+        """W2: a completed-but-missing-provider-id row stays claimable —
+        no refund-block marker is ever persisted for it."""
+        payments = self._payments(self._row(provider_payment_id=None),
+                                  claim=False)
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(payments=payments)), \
+             patch('apps.payments.services.create_refund') as mock_refund:
+            status, _ = services.refund_payment('pr-9', None)
+        assert status == 409
+        mock_refund.assert_not_called()
+        payments.update.assert_not_called()
+
+    def test_refund_amount_validation_failure_never_claims(self):
+        payments = self._payments(self._row())
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(payments=payments)), \
+             patch('apps.payments.services.create_refund') as mock_refund:
+            status, _ = services.refund_payment('pr-9', 'abc')
+        assert status == 422
+        mock_refund.assert_not_called()
+        payments.update.assert_not_called()
