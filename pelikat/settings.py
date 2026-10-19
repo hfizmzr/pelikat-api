@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -8,7 +10,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-change-this-in-production')
 
-DEBUG = os.environ.get('DEBUG', 'True').lower() == 'true'
+# M5: default OFF — an unset DEBUG env var must not enable debug mode in prod.
+DEBUG = os.environ.get('DEBUG', 'False').lower() in ('1', 'true', 'yes')
 
 ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
@@ -21,6 +24,7 @@ INSTALLED_APPS = [
     'apps.ecert',
     'apps.badges',
     'apps.documents',
+    'apps.payments',
 ]
 
 MIDDLEWARE = [
@@ -59,7 +63,18 @@ SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
 SUPABASE_JWT_SECRET = os.environ.get('SUPABASE_JWT_SECRET', '')
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY', '')
+
+if not INTERNAL_API_KEY and not DEBUG:
+    raise ImproperlyConfigured(
+        'INTERNAL_API_KEY must be set when DEBUG is False')
 DOCUMENT_ENCRYPTION_KEY = os.environ.get('DOCUMENT_ENCRYPTION_KEY', '')
+HITPAY_API_URL = os.environ.get('HITPAY_API_URL', '')
+HITPAY_API_KEY = os.environ.get('HITPAY_API_KEY', '')
+HITPAY_WEBHOOK_SALT = os.environ.get('HITPAY_WEBHOOK_SALT', '')
+# Optional: force-enable specific HitPay rails, comma-separated
+# (e.g. grabpay_direct,shopee_pay,atome). Empty = let the merchant
+# Dashboard's toggled-on rails govern (payment_methods omitted from payload).
+HITPAY_PAYMENT_METHODS = os.environ.get('HITPAY_PAYMENT_METHODS', '')
 
 _AI_PHOTOS_YOLO_MODEL_PATH = os.environ.get('AI_PHOTOS_YOLO_MODEL_PATH')
 AI_PHOTOS_YOLO_MODEL_PATH = str(

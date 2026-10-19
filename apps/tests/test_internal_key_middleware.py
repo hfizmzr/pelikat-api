@@ -71,3 +71,11 @@ class TestInternalKeyMiddleware:
         response = api_client.get('/')
         # Should not get 401 from InternalKeyMiddleware
         assert response.status_code != 401
+
+    def test_comparison_uses_compare_digest(self):
+        """L1: the internal-key comparison must be constant-time."""
+        import inspect
+        from pelikat.middleware import InternalKeyMiddleware
+
+        source = inspect.getsource(InternalKeyMiddleware.__call__)
+        assert 'compare_digest' in source
