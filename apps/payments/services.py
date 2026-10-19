@@ -219,12 +219,19 @@ def _reuse_pending_payment(existing: dict) -> tuple[int, dict]:
         logger.warning('Could not re-fetch HitPay PR %s; reusing stored payment row',
                        existing['provider_request_id'], exc_info=True)
     qr = (existing.get('qr_code_data') or {}).get('qr_code')
+    # Race guard: if the local row is still pending but HitPay already
+    # shows completed, do NOT surface completion before confirm_payment
+    # has audited locally — the webhook/reconcile idempotent confirm
+    # finalizes the row, and subsequent status GETs report the truth.
+    status = pr.get('status', existing.get('status'))
+    if existing.get('status') == 'pending' and status != 'pending':
+        status = existing['status']
     return 200, {
         'provider_request_id': existing['provider_request_id'],
         'checkout_url': pr.get('url'),
         'qr_code': qr,
         'direct_link_url': (pr.get('direct_link') or {}).get('direct_link_url'),
-        'status': pr.get('status', existing.get('status')),
+        'status': status,
     }
 
 
@@ -263,10 +270,13 @@ def _recover_abandoned_sentinel(sb, *, order_type, registration_id,
     Ordered per the 064 runbook:
       failed lookup (timeout/5xx)    → keep the sentinel; None ⇒ friendly 409;
       sentinel younger than 2 min    → live create still in flight; 409;
-      zero hitpay candidates         → guarded delete + ONE recursive re-run;
-      one candidate (strict identity)→ adopt: pending reuses the checkout
-        URL (M1 shape), completed runs the webhook's idempotent
-        confirm_payment and responds with the finalized shape;
+      zero candidates                → guarded delete + ONE recursive re-run;
+      candidates ALL fail identity   → 409, sentinel KEPT (deleting it
+        would strand a real pending PR); manual review;
+      one candidate (strict identity)→ adopt: pending reuses the
+        checkout URL (M1 shape), completed runs the webhook's idempotent
+        confirm_payment and responds with the finalized shape (or, on
+        confirm failure, keeps the row pending for reconcile/webhook);
       multiple candidates            → 409 + loud ops log, NO adoption.
 
     Candidate scoping (docs verified): HitPay's list endpoint supports
@@ -339,8 +349,11 @@ def _recover_abandoned_sentinel(sb, *, order_type, registration_id,
     candidates = [c for c in candidates if str(c.get('id')) not in linked]
 
     # Strict identity: this exact target + matching amount/currency.
+    # Unrelated partial-search results (not naming this target) are NOT
+    # candidates: they never block the no-candidate recovery path.
     expected_metadata = f'{order_type}:{target}'
     matches = []
+    target_named_mismatches = []
     for c in candidates:
         metadata = c.get('metadata') if isinstance(c.get('metadata'), dict) else {}
         names_target = (str(c.get('reference_number') or '') == target
@@ -349,10 +362,13 @@ def _recover_abandoned_sentinel(sb, *, order_type, registration_id,
             continue
         try:
             if abs(Decimal(str(c.get('amount'))) - Decimal(str(amount))) > Decimal('0.01'):
+                target_named_mismatches.append(c)
                 continue
         except (InvalidOperation, TypeError):
+            target_named_mismatches.append(c)
             continue
         if str(c.get('currency') or 'MYR').upper() != currency:
+            target_named_mismatches.append(c)
             continue
         matches.append(c)
 
@@ -364,6 +380,31 @@ def _recover_abandoned_sentinel(sb, *, order_type, registration_id,
             'resolve manually', len(matches), order_type, sentinel, ids)
         return 409, {'error': 'Checkout already initializing; retry in a '
                               'few seconds'}
+
+    if not matches and target_named_mismatches:
+        # A target-NAMING candidate FAILED the strict identity match:
+        # deleting the sentinel and re-creating would strand a REAL pending
+        # PR at HitPay that no local row references (webhook/confirm
+        # null-match, charge unrecordable). Leave the pair untouched for
+        # ops review. Unrelated search noise does NOT hit this branch.
+        details = ''
+        for c in target_named_mismatches:
+            meta = c.get('metadata')
+            pelikat_order = (meta or {}).get('pelikat_order') \
+                if isinstance(meta, dict) else None
+            details += (f"id={c.get('id')} actual(amount={c.get('amount')}, "
+                        f"currency={c.get('currency')}, "
+                        f"reference_number={c.get('reference_number')}, "
+                        f"metadata={pelikat_order}); ")
+        logger.error(
+            'sentinel recovery: candidate PR(s) for order_type=%s target=%s '
+            'FAILED strict identity check against sentinel %s '
+            '(expected amount=%s currency=%s reference=%s) — sentinel kept, '
+            'NO re-create; manual review required. Candidates: %s',
+            order_type, target, sentinel, amount, currency, target, details)
+        return 409, {'error': 'Payment initialization requires manual '
+                     'review; contact support or try a fresh '
+                     'registration later.'}
 
     # No candidates → sentinel is a verified-before-create crash: signal
     # the caller (the claim's owner) to run the fresh flow once more.
@@ -389,10 +430,13 @@ def _recover_abandoned_sentinel(sb, *, order_type, registration_id,
     qr_code = qr_data.get('qr_code') if isinstance(qr_data, dict) else None
 
     try:
+        # Persist ONLY the real PR linkage (+ QR snapshot); KEEP
+        # status='pending' until confirm_payment succeeds — an exception
+        # mid-way must never leave a non-pending row that no
+        # webhook/redelivery/reconcile path can finalize.
         sb.table('payments').update({
             'provider_request_id': real_id,
             'provider': 'hitpay',
-            'status': pr_status,
             'qr_code_data': {'qr_code': qr_code} if qr_code else None,
         }).eq('provider_request_id', sentinel).execute()
     except Exception:
@@ -414,9 +458,10 @@ def _recover_abandoned_sentinel(sb, *, order_type, registration_id,
         # The money likely already moved: run the webhook's own idempotent
         # confirm path (the same rpc confirm_payment the verified event
         # handler uses) with the PR's succeeded sub-payment.
-        payments = match.get('payments') or []
-        succeeded = next((p for p in payments if p.get('status') == 'succeeded'),
-                         None)
+        payments_list = match.get('payments') or []
+        succeeded = next((p for p in payments_list
+                          if p.get('status') == 'succeeded'), None)
+        confirm_ok = True
         try:
             sb.rpc('confirm_payment', {
                 'p_provider_request_id': real_id,
@@ -424,24 +469,45 @@ def _recover_abandoned_sentinel(sb, *, order_type, registration_id,
                 'p_rail': succeeded.get('payment_type') if succeeded else None,
             }).execute()
         except Exception:
-            # Idempotent; reconciliation/webhook redelivery re-runs it.
+            # NOT finalized: leave the row pending with the real PR id —
+            # webhook redelivery / reconcile (which polls pending rows)
+            # re-runs the idempotent confirm and closes it later. Do NOT
+            # surface completion to the caller yet.
+            confirm_ok = False
             logger.exception('sentinel recovery: confirm_payment failed '
-                             'for %s; finalize path continues (200 body)',
-                             real_id)
+                             'for %s; row left pending for '
+                             'reconcile/webhook redelivery', real_id)
+        if confirm_ok:
+            logger.info('sentinel recovery: adopted COMPLETED PR %s for %s '
+                        '— finalized via confirm_payment', real_id, order_type)
+            direct_link = match.get('direct_link') or {}
+            return 200, {
+                'provider_request_id': real_id,
+                'checkout_url': match.get('url'),
+                'qr_code': qr_code,
+                'direct_link_url': direct_link.get('direct_link_url'),
+                'status': match.get('status', pr_status),
+            }
         logger.info('sentinel recovery: adopted COMPLETED PR %s for %s — '
-                    'finalized via confirm_payment', real_id, order_type)
-    else:
-        logger.info('sentinel recovery: adopted pending PR %s for %s — '
-                    'reusing its checkout URL', real_id, order_type)
-
-    direct_link = match.get('direct_link') or {}
+                    'confirmation in progress (row stays pending)',
+                    real_id, order_type)
+        return 200, {
+            'provider_request_id': real_id,
+            'checkout_url': match.get('url'),
+            'qr_code': qr_code,
+            'direct_link_url': (match.get('direct_link') or {})
+                .get('direct_link_url'),
+            'status': 'pending',
+            'message': 'Payment received but confirmation is in progress',
+        }
     # M1-compatible reuse shape (drives the normal GET /payments/status /
-    # follow flow); status carries the adopted PR's truth.
+    # follow flow); the pending PR's own truth is carried in the body.
     return 200, {
         'provider_request_id': real_id,
         'checkout_url': match.get('url'),
         'qr_code': qr_code,
-        'direct_link_url': direct_link.get('direct_link_url'),
+        'direct_link_url': (match.get('direct_link') or {})
+            .get('direct_link_url'),
         'status': match.get('status', pr_status),
     }
 

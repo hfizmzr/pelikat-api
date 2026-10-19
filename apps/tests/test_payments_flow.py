@@ -436,7 +436,10 @@ class TestSentinelRecovery:
     flow once."""
 
     OLD_TS = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-    RECENT_TS = datetime.now(timezone.utc).isoformat()
+    def _recent_ts(self):
+        # Computed at call time so slow CI (collection/imports between)
+        # can't age a 'young' sentinel into recovery age (fixture flake).
+        return datetime.now(timezone.utc).isoformat()
     REG = '11111111-1111-1111-1111-111111111111'
 
     def _payload(self):
@@ -591,6 +594,106 @@ class TestSentinelRecovery:
         assert params == {'p_provider_request_id': 'orphan-2',
                           'p_provider_payment_id': 'pay-1',
                           'p_rail': 'paynow'}
+        # The adoption update never writes a non-pending status: the id is
+        # persisted first, the rpc finalizes.
+        adopt = payments.update.call_args.args[0]
+        assert 'status' not in adopt
+
+    def test_recovery_identity_mismatch_keeps_sentinel(self, api_client,
+                                                        caplog):
+        """A candidate that fails the strict identity check (wrong amount)
+        is NEVER adopted or re-created past: deleting the sentinel would
+        strand the REAL pending PR at HitPay — ops-leave-in-place 409."""
+        orphan = {'id': 'orphan-9', 'url': 'https://hp/x', 'status': 'pending',
+                  'reference_number': self.REG,
+                  'amount': '99.99', 'currency': 'MYR'}
+        payments = self._recovery_payments()
+        sb = self._claim_in_progress_sb(payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.list_payment_requests',
+                   return_value=self._list_response(orphan)), \
+             patch('apps.payments.services.create_payment_request') as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(),
+                content_type='application/json', **_auth())
+        assert response.status_code == 409
+        assert response.json()['error'] == \
+            'Payment initialization requires manual review; contact ' \
+            'support or try a fresh registration later.'
+        mock_create.assert_not_called()
+        payments.delete.assert_not_called()
+        payments.update.assert_not_called()
+        assert any(('strict identity' in r.message and 'orphan-9' in r.message)
+                   for r in caplog.records)
+
+    def test_recovery_completed_confirm_failure_leaves_pending_row(
+            self, api_client, caplog):
+        """confirm_payment failing during completed-orphan adoption must
+        NOT write a non-pending status: the row stays pending WITH the real
+        PR id — exactly the scope reconcile_stale_payments polls
+        (.eq('status', 'pending'), no sentinel filter) and the webhook's
+        idempotent confirm matches."""
+        orphan = {'id': 'orphan-2', 'url': 'https://hp/orphan2',
+                  'status': 'completed',
+                  'reference_number': self.REG,
+                  'amount': '50.00', 'currency': 'MYR',
+                  'payments': [{'id': 'pay-1', 'status': 'succeeded',
+                                'payment_type': 'paynow'}]}
+        payments = self._recovery_payments()
+        sb = self._claim_in_progress_sb(payments)
+        confirm = MagicMock(execute=MagicMock(
+            side_effect=RuntimeError('rpc down')))
+        sb.rpc = MagicMock(side_effect=[sb.rpc.return_value, confirm])
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.list_payment_requests',
+                   return_value=self._list_response(orphan)), \
+             patch('apps.payments.services.create_payment_request') as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(),
+                content_type='application/json', **_auth())
+        assert response.status_code == 200
+        body = response.json()
+        assert body['status'] == 'pending'
+        assert body['provider_request_id'] == 'orphan-2'
+        assert 'confirmation is in progress' in body['message']
+        mock_create.assert_not_called()
+        # No finalized status was written: the adoption update carries only
+        # the linkage fields (status stays 'pending' for reconcile proving
+        # the real id is poll-targeted).
+        adopt = payments.update.call_args.args[0]
+        assert 'status' not in adopt
+        assert adopt['provider_request_id'] == 'orphan-2'
+        name, params = sb.rpc.call_args_list[-1].args
+        assert name == 'confirm_payment'
+        assert params['p_provider_request_id'] == 'orphan-2'
+        assert any('confirm_payment failed' in r.message
+                   for r in caplog.records)
+
+    def test_recovery_unrelated_search_results_still_release_sentinel(
+            self, api_client):
+        """Partial-search noise that does NOT name the target is not a
+        candidate: its presence does not block the delete+fresh-flow."""
+        noise = {'id': 'other-order-pr', 'url': 'https://hp/other',
+                 'status': 'pending', 'reference_number': '99999999',
+                 'amount': '99.99', 'currency': 'MYR'}
+        payments = self._recovery_payments(verify_rows=False)
+        sb = self._claim_in_progress_sb(
+            payments, second_claim={
+                'provider_request_id': 'pending:fresh-2',
+                'is_reservation': True})
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.list_payment_requests',
+                   return_value=self._list_response(noise)), \
+             patch('apps.payments.services.create_payment_request',
+                   return_value={'id': 'pr-new', 'url': 'https://hp/n',
+                                 'status': 'pending'}) as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(),
+                content_type='application/json', **_auth())
+        assert response.status_code == 201
+        assert mock_create.call_count == 1
+        assert payments.update.call_args.args[0]['provider_request_id'] == 'pr-new'
+        payments.delete.assert_called()
 
     def test_recovery_lookup_failure_keeps_sentinel(self, api_client):
         payments = self._recovery_payments()
@@ -635,7 +738,7 @@ class TestSentinelRecovery:
     def test_recovery_young_sentinel_not_deleted(self, api_client):
         """A seconds-old sentinel is a live in-flight create: never delete,
         never adopt — the plain 063 friendly 409 stands."""
-        payments = self._recovery_payments(created_at=self.RECENT_TS)
+        payments = self._recovery_payments(created_at=self._recent_ts())
         sb = self._claim_in_progress_sb(payments)
         with patch('apps.payments.services.get_sb', return_value=sb), \
              patch('apps.payments.services.list_payment_requests',
