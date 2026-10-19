@@ -429,6 +429,258 @@ class TestCreatePayment:
 
 
 @pytest.mark.reliability
+class TestSentinelRecovery:
+    """in_progress-claim abandonment recovery (PR#23 CodeRabbit Major):
+    adopt a live orphan PR, finalize a completed one, or — only for a
+    verified pre-create crash — delete the sentinel and re-run the fresh
+    flow once."""
+
+    OLD_TS = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    RECENT_TS = datetime.now(timezone.utc).isoformat()
+    REG = '11111111-1111-1111-1111-111111111111'
+
+    def _payload(self):
+        return {
+            'order_type': 'registration',
+            'registration_id': self.REG,
+            'amount': '50.00',
+            'email': 'runner@example.com',
+            'name': 'Runner One',
+            'redirect_url': 'https://web.example.com/runner/payment?reg=x',
+        }
+
+    def _claim_in_progress_sb(self, payments, second_claim=None):
+        """RPC: first claim is in_progress; an optional second result backs
+        the recovery re-run's fresh claim."""
+        sb = _mock_sb(registrations=_table([{'category_id': 'c1'}]),
+                      race_categories=_table([{'price': '50.00'}]),
+                      payments=payments)
+        first = MagicMock(execute=MagicMock(return_value=MagicMock(
+            data=[{'provider_request_id': None, 'is_reservation': False,
+                   'in_progress': True}])))
+        if second_claim is not None:
+            second = MagicMock(execute=MagicMock(return_value=MagicMock(
+                data=[second_claim])))
+            sb.rpc = MagicMock(side_effect=[first, second])
+        else:
+            sb.rpc = MagicMock(return_value=first)
+        return sb
+
+    def _recovery_payments(self, sentinel_id='pending:stale-1',
+                           created_at=None, linked_rows=None,
+                           verify_rows=True):
+        """Payments mock whose select chains come back in the recovery
+        call order: 1 sentinel lookup, 2 linked-PR exclusion, 3
+        adoption-verification."""
+        payments = MagicMock()
+        sentinel_chain, linked_chain, verify_chain = (MagicMock(),
+                                                      MagicMock(),
+                                                      MagicMock())
+        sentinel_chain.eq.return_value.eq.return_value.eq.return_value \
+            .like.return_value.limit.return_value.execute.return_value = \
+            MagicMock(data=[{
+                'provider_request_id': sentinel_id,
+                'created_at': created_at or self.OLD_TS,
+            }])
+        linked_chain.eq.return_value.eq.return_value.not_.like.return_value \
+            .execute.return_value = MagicMock(data=linked_rows or [])
+        verify_chain.eq.return_value.limit.return_value.execute.return_value \
+            = MagicMock(data=[{'provider_request_id': 'orphan-1'}]
+                        if verify_rows else [])
+        payments.select = MagicMock(
+            side_effect=[sentinel_chain, linked_chain, verify_chain])
+        return payments
+
+    @staticmethod
+    def _list_response(*prs):
+        return list(prs)
+
+    def test_recovery_no_candidates_deletes_sentinel_and_creates_fresh(
+            self, api_client):
+        payments = self._recovery_payments(verify_rows=False)
+        sb = self._claim_in_progress_sb(
+            payments, second_claim={
+                'provider_request_id': 'pending:fresh-2',
+                'is_reservation': True})
+        hitpay_pr = {'id': 'pr-new', 'url': 'https://hp/pr-new',
+                     'status': 'pending'}
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.list_payment_requests',
+                   return_value=self._list_response()), \
+             patch('apps.payments.services.create_payment_request',
+                   return_value=hitpay_pr) as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(),
+                content_type='application/json', **_auth())
+        assert response.status_code == 201
+        # The stale sentinel was deleted (guarded: eq + like pending:%).
+        delete_eqs = [c.args for c in
+                      payments.delete.return_value.eq.call_args_list]
+        assert ('provider_request_id', 'pending:stale-1') in delete_eqs
+        delete_likes = payments.delete.return_value.eq.return_value.like \
+            .call_args_list
+        assert [c.args for c in delete_likes] == \
+            [('provider_request_id', 'pending:%')]
+        # HitPay create ran exactly once — on the fresh flow, after the
+        # second claim.
+        assert mock_create.call_count == 1
+        payload = mock_create.call_args.args[0]
+        assert payload['metadata[pelikat_order]'] == \
+            f'registration:{self.REG}'
+        # No secrets in the create payload.
+        assert not any('secret' in k.lower() for k in payload)
+        # The fresh sentinel was swapped for the real id.
+        update = payments.update.call_args.args[0]
+        assert update['provider_request_id'] == 'pr-new'
+
+    def test_recovery_adopts_pending_orphan_reuses_url(self, api_client):
+        orphan = {'id': 'orphan-1', 'url': 'https://hp/orphan',
+                  'direct_link': {'direct_link_url': 'https://hp/dl'},
+                  'status': 'pending',
+                  'reference_number': self.REG,
+                  'amount': '50.00', 'currency': 'MYR'}
+        payments = self._recovery_payments()
+        sb = self._claim_in_progress_sb(payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.list_payment_requests',
+                   return_value=self._list_response(orphan)), \
+             patch('apps.payments.services.create_payment_request') as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(),
+                content_type='application/json', **_auth())
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {
+            'provider_request_id': 'orphan-1',
+            'checkout_url': 'https://hp/orphan',
+            'qr_code': None,
+            'direct_link_url': 'https://hp/dl',
+            'status': 'pending',
+        }
+        mock_create.assert_not_called()
+        # Guarded single-condition adoption; update payload swaps the
+        # sentinel for the orphan id.
+        adopt = payments.update.call_args.args[0]
+        assert adopt['provider_request_id'] == 'orphan-1'
+        update_eqs = [c.args for c in
+                      payments.update.return_value.eq.call_args_list]
+        assert ('provider_request_id', 'pending:stale-1') in update_eqs
+
+    def test_recovery_adopts_completed_orphan_and_confirms(self, api_client):
+        orphan = {'id': 'orphan-2', 'url': 'https://hp/orphan2',
+                  'status': 'completed',
+                  'reference_number': self.REG,
+                  'amount': '50.00', 'currency': 'MYR',
+                  'payments': [{'id': 'pay-1', 'status': 'succeeded',
+                                'payment_type': 'paynow'}]}
+        payments = self._recovery_payments()
+        sb = self._claim_in_progress_sb(payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.list_payment_requests',
+                   return_value=self._list_response(orphan)), \
+             patch('apps.payments.services.create_payment_request') as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(),
+                content_type='application/json', **_auth())
+        assert response.status_code == 200
+        assert response.json()['status'] == 'completed'
+        mock_create.assert_not_called()
+        # Same idempotent confirm_payment path the webhook uses.
+        name, params = sb.rpc.call_args.args
+        assert name == 'confirm_payment'
+        assert params == {'p_provider_request_id': 'orphan-2',
+                          'p_provider_payment_id': 'pay-1',
+                          'p_rail': 'paynow'}
+
+    def test_recovery_lookup_failure_keeps_sentinel(self, api_client):
+        payments = self._recovery_payments()
+        sb = self._claim_in_progress_sb(payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.list_payment_requests',
+                   side_effect=HitPayError('upstream exploded', status=503)), \
+             patch('apps.payments.services.create_payment_request') as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(),
+                content_type='application/json', **_auth())
+        assert response.status_code == 409
+        assert response.json()['error'] == \
+            'Checkout already initializing; retry in a few seconds'
+        mock_create.assert_not_called()
+        payments.delete.assert_not_called()
+        payments.update.assert_not_called()
+
+    def test_recovery_multiple_candidates_refuses_adoption(
+            self, api_client, caplog):
+        orphan_a = {'id': 'orphan-a', 'url': 'https://hp/a',
+                    'status': 'pending', 'reference_number': self.REG,
+                    'amount': '50.00', 'currency': 'MYR'}
+        orphan_b = {'id': 'orphan-b', 'url': 'https://hp/b',
+                    'status': 'pending', 'reference_number': self.REG,
+                    'amount': '50.00', 'currency': 'MYR'}
+        payments = self._recovery_payments()
+        sb = self._claim_in_progress_sb(payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.list_payment_requests',
+                   return_value=self._list_response(orphan_a, orphan_b)), \
+             patch('apps.payments.services.create_payment_request') as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(),
+                content_type='application/json', **_auth())
+        assert response.status_code == 409
+        mock_create.assert_not_called()
+        payments.update.assert_not_called()
+        payments.delete.assert_not_called()
+        assert any('ambiguous' in r.message for r in caplog.records)
+
+    def test_recovery_young_sentinel_not_deleted(self, api_client):
+        """A seconds-old sentinel is a live in-flight create: never delete,
+        never adopt — the plain 063 friendly 409 stands."""
+        payments = self._recovery_payments(created_at=self.RECENT_TS)
+        sb = self._claim_in_progress_sb(payments)
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.list_payment_requests',
+                   return_value=self._list_response()) as mock_list, \
+             patch('apps.payments.services.create_payment_request') as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(),
+                content_type='application/json', **_auth())
+        assert response.status_code == 409
+        assert response.json()['error'] == \
+            'Checkout already initializing; retry in a few seconds'
+        # A young sentinel short-circuits before the HitPay lookup.
+        mock_list.assert_not_called()
+        mock_create.assert_not_called()
+        payments.delete.assert_not_called()
+        payments.update.assert_not_called()
+
+    def test_recovery_id_already_linked_locally_is_excluded(self, api_client):
+        """An orphan whose id already sits on a local row is not adopted —
+        after exclusion the candidate list is empty, so the pre-create
+        delete path (and its fresh flow) runs instead."""
+        orphan = {'id': 'already-linked', 'url': 'https://hp/x',
+                  'status': 'pending', 'reference_number': self.REG,
+                  'amount': '50.00', 'currency': 'MYR'}
+        payments = self._recovery_payments(
+            linked_rows=[{'provider_request_id': 'already-linked'}],
+            verify_rows=False)
+        sb = self._claim_in_progress_sb(
+            payments, second_claim={
+                'provider_request_id': 'pending:fresh-2',
+                'is_reservation': True})
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.list_payment_requests',
+                   return_value=self._list_response(orphan)), \
+             patch('apps.payments.services.create_payment_request',
+                   return_value={'id': 'pr-new', 'url': 'https://hp/n',
+                                 'status': 'pending'}) as mock_create:
+            response = api_client.post(
+                '/payments/create', data=self._payload(),
+                content_type='application/json', **_auth())
+        assert response.status_code == 201
+        mock_create.assert_called_once()   # fresh flow, no adopt
+
+
+@pytest.mark.reliability
 class TestPaymentStatus:
     def test_status_returns_fields(self, api_client):
         payments = _table([{'status': 'pending', 'payment_rail': None,
@@ -969,6 +1221,11 @@ class TestRefundRemainingAndUnknown:
         updates = [c.args[0] for c in payments.update.call_args_list]
         assert [u.get('refunded_amount') for u in updates
                 if 'refunded_amount' in u] == ['10.00']
+        # Every state transition was a guarded update, not a bare overwrite:
+        # claim(winner) + claim(loser) + release must all have filtered on
+        # the same payments row (claim + release ≥ 2 guarded chains).
+        assert len(payments.update.return_value.eq.call_args_list) >= 2
+        # The release itself is exactly the marker clear — no co-writes.
         assert updates[-1] == {'refund_blocked_reason': None}
 
     def test_refund_claim_released_on_post_claim_validation_failure(self):

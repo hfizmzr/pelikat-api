@@ -16,7 +16,7 @@ from django.conf import settings
 from supabase import create_client
 
 from .hitpay import (HitPayError, create_payment_request, create_refund,
-                     get_payment_request)
+                     get_payment_request, list_payment_requests)
 
 logger = logging.getLogger(__name__)
 
@@ -233,8 +233,226 @@ def _reuse_pending_payment(existing: dict) -> tuple[int, dict]:
 # id once the upstream create succeeds (fixed formatter pin, see docs).
 RESERVATION_PREFIX = 'pending:'
 
+# An in_progress sentinel is recoverable (adopt-or-delete) only after this
+# much time: younger sentinels are almost certainly a LIVE create still in
+# flight (upstream timeout is 20s), and mutating them would race the
+# winner's linking update. Older ones are crash residue (064 runbook).
+SENTINEL_RECOVER_AFTER = timedelta(minutes=2)
 
-def create_payment(data: dict) -> tuple[int, dict]:
+# metadata key HitPay PRs carry after the recovery change: 'order_type:target'
+# (one key → respects the list endpoint's "first metadata pair wins" filter).
+SENTINEL_METADATA_KEY = 'metadata[pelikat_order]'
+
+
+def _split_target(registration_id, merch_order_id, organizer_id):
+    """The one target-scoped column/value pair for this order (the same
+    keys claim_payment_slot serializes on)."""
+    for column, value in (('registration_id', registration_id),
+                          ('merch_order_id', merch_order_id),
+                          ('organizer_id', organizer_id)):
+        if value:
+            return column, value
+    return None, None
+
+
+def _recover_abandoned_sentinel(sb, *, order_type, registration_id,
+                                merch_order_id, organizer_id,
+                                amount, currency) -> tuple[int, dict] | None:
+    """063/064 in_progress-branch recovery (PR#23 CodeRabbit Major).
+
+    Ordered per the 064 runbook:
+      failed lookup (timeout/5xx)    → keep the sentinel; None ⇒ friendly 409;
+      sentinel younger than 2 min    → live create still in flight; 409;
+      zero hitpay candidates         → guarded delete + ONE recursive re-run;
+      one candidate (strict identity)→ adopt: pending reuses the checkout
+        URL (M1 shape), completed runs the webhook's idempotent
+        confirm_payment and responds with the finalized shape;
+      multiple candidates            → 409 + loud ops log, NO adoption.
+
+    Candidate scoping (docs verified): HitPay's list endpoint supports
+    `search` (partial match on email/id/reference_number) and
+    `metadata[key]` (exact value, first pair only). The strict matcher
+    below is authoritative: a PR whose reference_number or metadata does
+    not name THIS exact target, or whose amount/currency disagree, is
+    never adopted (no cross-tenant leakage).
+    """
+    column, value = _split_target(registration_id, merch_order_id, organizer_id)
+    if column is None:
+        return None
+    target = str(value)
+
+    sentinel_rows = (sb.table('payments').select('*')
+                     .eq('order_type', order_type)
+                     .eq(column, value)
+                     .eq('status', 'pending')
+                     .like('provider_request_id', 'pending:%')
+                     .limit(1).execute())
+    sentinels = sentinel_rows.data or []
+    if not sentinels:
+        # Recovered concurrently between the claim and here; the next
+        # attempt runs the normal fresh flow.
+        return None
+    sentinel = str(sentinels[0].get('provider_request_id'))
+
+    created_at = sentinels[0].get('created_at')
+    if created_at:
+        try:
+            created = datetime.fromisoformat(str(created_at))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - created < SENTINEL_RECOVER_AFTER:
+                logger.info(
+                    'sentinel recovery: %s (%s) is seconds old; assuming a '
+                    'live in-flight create and waiting', order_type, sentinel)
+                return None
+        except (ValueError, TypeError):
+            logger.warning('sentinel recovery: unparseable created_at on %s; '
+                           'keeping it', sentinel)
+            return None
+
+    reference = str(target) if order_type != 'organizer_subscription' else None
+    try:
+        # `search` is docs-supported for registration/merch (their identity
+        # field IS the reference_number); subscriptions carry the metadata
+        # pair instead — an unambiguous global key for this one target.
+        params = ({'search': reference} if reference
+                  else {SENTINEL_METADATA_KEY: f'{order_type}:{target}'})
+        raw = list_payment_requests(params)
+    except Exception:
+        logger.warning(
+            'sentinel recovery: HitPay PR lookup failed for order_type=%s; '
+            'keeping sentinel (no delete/adopt on uncertainty)',
+            order_type, exc_info=True)
+        return None
+
+    candidates = list(raw) if isinstance(raw, list) else []
+
+    # (b) Exclude ids already linked on a local row (sentinels excluded —
+    # a linked real PR is already owned by a live row somewhere).
+    linked_rows = (sb.table('payments').select('provider_request_id')
+                   .eq('order_type', order_type)
+                   .eq(column, value)
+                   .not_.like('provider_request_id', 'pending:%')
+                   .execute())
+    linked = {str(r.get('provider_request_id'))
+              for r in (linked_rows.data or []) if r.get('provider_request_id')}
+    candidates = [c for c in candidates if str(c.get('id')) not in linked]
+
+    # Strict identity: this exact target + matching amount/currency.
+    expected_metadata = f'{order_type}:{target}'
+    matches = []
+    for c in candidates:
+        metadata = c.get('metadata') if isinstance(c.get('metadata'), dict) else {}
+        names_target = (str(c.get('reference_number') or '') == target
+                        or metadata.get('pelikat_order') == expected_metadata)
+        if not names_target:
+            continue
+        try:
+            if abs(Decimal(str(c.get('amount'))) - Decimal(str(amount))) > Decimal('0.01'):
+                continue
+        except (InvalidOperation, TypeError):
+            continue
+        if str(c.get('currency') or 'MYR').upper() != currency:
+            continue
+        matches.append(c)
+
+    if len(matches) > 1:
+        ids = [str(m.get('id')) for m in matches]
+        logger.error(
+            'sentinel recovery: %d orphan PRs ambiguous for order_type=%s '
+            'target=%s (ids=%s); refusing blind adoption — ops must '
+            'resolve manually', len(matches), order_type, sentinel, ids)
+        return 409, {'error': 'Checkout already initializing; retry in a '
+                              'few seconds'}
+
+    # No candidates → sentinel is a verified-before-create crash: signal
+    # the caller (the claim's owner) to run the fresh flow once more.
+    if not matches:
+        # Guarded delete: the target row must STILL be a `pending:...`
+        # sentinel at the moment of deletion (someone could have adopted
+        # it concurrently — that update would have swapped the id, so the
+        # .like guard matches 0 rows and no harm is done).
+        sb.table('payments').delete() \
+            .eq('provider_request_id', sentinel) \
+            .like('provider_request_id', 'pending:%').execute()
+        logger.info(
+            'sentinel recovery: no orphan PR found; released crashed '
+            'sentinel %s (order_type=%s) — one fresh flow re-run follows',
+            sentinel, order_type)
+        return _RECOVERY_RETRY
+
+    # ONE candidate → adopt it.
+    match = matches[0]
+    real_id = str(match['id'])
+    pr_status = str(match.get('status') or 'pending')
+    qr_data = match.get('qr_code_data')
+    qr_code = qr_data.get('qr_code') if isinstance(qr_data, dict) else None
+
+    try:
+        sb.table('payments').update({
+            'provider_request_id': real_id,
+            'provider': 'hitpay',
+            'status': pr_status,
+            'qr_code_data': {'qr_code': qr_code} if qr_code else None,
+        }).eq('provider_request_id', sentinel).execute()
+    except Exception:
+        logger.exception(
+            'sentinel recovery: adoption update failed for sentinel %s → '
+            '%s; caller retries normally', sentinel, real_id)
+        return None
+
+    # Adoption lost the race? (someone else swapped the sentinel in
+    # between). A verify-select naming the real id resolves it.
+    verify = (sb.table('payments').select('provider_request_id')
+              .eq('provider_request_id', real_id).limit(1).execute())
+    if not (verify.data or []):
+        logger.warning('sentinel recovery: adoption of %s did not take '
+                       'eff(verified 0 rows) — caller will re-claim', real_id)
+        return None
+
+    if pr_status == 'completed':
+        # The money likely already moved: run the webhook's own idempotent
+        # confirm path (the same rpc confirm_payment the verified event
+        # handler uses) with the PR's succeeded sub-payment.
+        payments = match.get('payments') or []
+        succeeded = next((p for p in payments if p.get('status') == 'succeeded'),
+                         None)
+        try:
+            sb.rpc('confirm_payment', {
+                'p_provider_request_id': real_id,
+                'p_provider_payment_id': succeeded.get('id') if succeeded else None,
+                'p_rail': succeeded.get('payment_type') if succeeded else None,
+            }).execute()
+        except Exception:
+            # Idempotent; reconciliation/webhook redelivery re-runs it.
+            logger.exception('sentinel recovery: confirm_payment failed '
+                             'for %s; finalize path continues (200 body)',
+                             real_id)
+        logger.info('sentinel recovery: adopted COMPLETED PR %s for %s — '
+                    'finalized via confirm_payment', real_id, order_type)
+    else:
+        logger.info('sentinel recovery: adopted pending PR %s for %s — '
+                    'reusing its checkout URL', real_id, order_type)
+
+    direct_link = match.get('direct_link') or {}
+    # M1-compatible reuse shape (drives the normal GET /payments/status /
+    # follow flow); status carries the adopted PR's truth.
+    return 200, {
+        'provider_request_id': real_id,
+        'checkout_url': match.get('url'),
+        'qr_code': qr_code,
+        'direct_link_url': direct_link.get('direct_link_url'),
+        'status': match.get('status', pr_status),
+    }
+
+
+# Sentinel-recovery protocol values for _recover_abandoned_sentinel's
+# return: a (status, body) tuple = adopted orphan; _RECOVERY_RETRY = the
+# dead sentinel was deleted, run the fresh flow once more; anything else
+# (None) = keep the default 063 friendly 409 (live create / uncertainty).
+_RECOVERY_RETRY = object()
+
+def create_payment(data: dict, _attempt: int = 0) -> tuple[int, dict]:
     """Create a HitPay payment request and snapshot the payment row.
 
     Race-safe via migration 062's atomic claim_payment_slot: the claim runs
@@ -285,9 +503,25 @@ def create_payment(data: dict) -> tuple[int, dict]:
     claim_rows = claim_result.data if isinstance(claim_result.data, list) else []
     claim_row = claim_rows[0] if claim_rows else None
     if claim_row and claim_row.get('in_progress'):
-        # 063 tri-state: a sentinel row already exists from an in-flight or
-        # crashed claim (provider_request_id is NULL here) — never create a
-        # second HitPay PR for it.
+        # 063 tri-state, extended per the 064 runbook: try SAFE recovery of
+        # a likely-crashed sentinel before the friendly 409 (in-flight
+        # lookups that fail or are too young keep returning 409 exactly as
+        # before). Recovery returns a (status, body) response tuple, or
+        # None for "keep the default 409 / continue fresh flow".
+        recovery = _recover_abandoned_sentinel(
+            sb, order_type=order_type, registration_id=registration_id,
+            merch_order_id=merch_order_id, organizer_id=organizer_id,
+            amount=amount, currency=currency)
+        if isinstance(recovery, tuple):
+            return recovery  # adopted a pending/completed orphan PR
+        if recovery is _RECOVERY_RETRY:
+            # Verified-dead sentinel was deleted: run the normal fresh
+            # flow exactly once more (depth-1 recursion guard).
+            if _attempt >= 1:
+                return 409, {'error': 'Could not reserve a payment slot; '
+                                      'try again'}
+            return create_payment(data, _attempt=_attempt + 1)
+        # in-flight live create or lookup uncertainty: unchanged 063 409.
         return 409, {
             'error': 'Checkout already initializing; retry in a few seconds',
         }
@@ -343,6 +577,14 @@ def create_payment(data: dict) -> tuple[int, dict]:
     reference_number = registration_id or merch_order_id
     if reference_number:
         payload['reference_number'] = str(reference_number)
+    # Recovery scope key: one metadata pair naming order_type + target id,
+    # so GET /payment-requests can filter an orphaned PR back to THIS
+    # logical order (organizer_subscription has no reference_number at
+    # all). Non-secret, well within HitPay's metadata limits (≤50 keys/
+    # ≤500-char values).
+    _scope_target = registration_id or merch_order_id or organizer_id
+    if _scope_target:
+        payload[SENTINEL_METADATA_KEY] = f'{order_type}:{_scope_target}'
     if data.get('phone'):
         payload['phone'] = data['phone']
     # generate_qr only when a single QR-capable method is requested.

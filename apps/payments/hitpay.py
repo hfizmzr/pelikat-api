@@ -59,6 +59,32 @@ def get_payment_request(request_id: str) -> dict:
     return response.json()
 
 
+def list_payment_requests(params: dict) -> list:
+    """GET /v1/payment-requests — filterable PR list, used only by sentinel
+    recovery. Backend-supported filters (docs.hitpayapp.com,
+    /apis/payment-request/get-payment-requests): `search` (partial match on
+    email, id, or reference_number) and `metadata` (exact key/value match,
+    first pair wins — sent as `metadata[key]` form params). Any 4xx/5xx
+    raises HitPayError; a 200 with an empty/absent collection is a valid
+    "no candidates" success."""
+    response = httpx.get(
+        f'{settings.HITPAY_API_URL}/payment-requests',
+        params=params,
+        headers=_headers(),
+        timeout=20,
+    )
+    _raise(response)
+    body = response.json()
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
+        for key in ('data', 'payment_requests'):
+            value = body.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
 def create_refund(payment_id: str, amount: str) -> dict:
     """POST /refunds — refund a charge by its charge id (NOT the PR id)."""
     response = httpx.post(
