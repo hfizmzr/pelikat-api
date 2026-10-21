@@ -108,6 +108,11 @@ def parse_td3(text: str) -> dict | None:
 def _resolve_date(d6: str, *, expiring: bool, errors: list[str]) -> str | None:
     """YYMMDD -> ISO date. Expiry years are always 20yy; birth uses the
     IC century convention. Undecipherable dates surface as errors."""
+    if not d6.isdigit():
+        # OCR may read 0 as O etc. — never crash the request (500);
+        # record the failure instead.
+        errors.append("undecipherable_date")
+        return None
     yy, mm, dd = int(d6[0:2]), int(d6[2:4]), int(d6[4:6])
     today = date.today()
     year = 2000 + yy if expiring else (1900 + yy if yy > today.year % 100 else 2000 + yy)

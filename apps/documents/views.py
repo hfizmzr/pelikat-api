@@ -116,7 +116,13 @@ def encrypt_view(request):
         return Response({"error": validation["reason"]}, status=422)
 
     try:
-        result = encrypt_document(file_bytes, user_id, validation.get("nric"))
+        # Identity number for the envelope: NRIC when detected, otherwise the
+        # MRZ passport number. Without the fallback, a fully valid passport
+        # upload stores no encrypted id at all (nric_encrypted null) and,
+        # needs_review being False in the clean-MRZ path, no reviewer is
+        # ever asked to key it in — data lost silently.
+        id_number = validation.get("nric") or validation.get("passport_number")
+        result = encrypt_document(file_bytes, user_id, id_number)
     except Exception:
         logger.exception("encrypt_document failed for user %s", user_id)
         return Response(
@@ -156,6 +162,10 @@ def encrypt_ic_view(request):
     user_id = request.data.get("user_id")
     dob = request.data.get("dob") or None
     gender = request.data.get("gender") or None
+    if dob and not isinstance(dob, str):
+        return Response({"error": "dob must be a string"}, status=400)
+    if gender and not isinstance(gender, str):
+        return Response({"error": "gender must be a string"}, status=400)
 
     if not ic_number or not user_id:
         return Response({"error": "ic_number and user_id are required"}, status=400)

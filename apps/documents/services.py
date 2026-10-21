@@ -165,9 +165,14 @@ def assert_image_dimensions(data: bytes) -> None:
     try:
         with Image.open(io.BytesIO(data)) as img:
             width, height = img.size
-    except Exception as exc:
-        logger.warning("image header peek failed: %s", exc)
-        return  # let the cv2 imdecode step produce the 422 message
+    except Image.DecompressionBombError as exc:
+        # Re-raise as our contract error (→ HTTP 413). Never "return" here:
+        # a returned bomb then reaches cv2.imdecode, which allocates the
+        # decompressed buffer before any pixel-cap check sees it.
+        logger.warning("decompression bomb rejected: %s", exc)
+        raise ValueError(
+            "Image is too large. Please upload a photo of at most 24 megapixels."
+        ) from exc
     if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
         raise ValueError(
             "Image is too large. Please upload a photo of at most 8000×8000 pixels.")

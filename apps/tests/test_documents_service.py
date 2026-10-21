@@ -103,6 +103,37 @@ class TestUploadGuardrails:
     def test_max_upload_size_constant(self):
         assert services.MAX_UPLOAD_BYTES == 10 * 1024 * 1024
 
+    def test_decompression_bomb_rejected_before_cv2(self):
+        """PIL Image.open raises DecompressionBombError for images above the
+        Pillow pixel limit. assert_image_dimensions must re-raise as its own
+        contract (ValueError → HTTP 413) and NEVER silently return: a silent
+        return sends the same bytes into cv2.imdecode, which allocates the
+        decompressed buffer before any pixel-cap check can reject it.
+
+        Uses a 66-byte synthetic PNG whose IHDR declares 20000×20000 (400MP,
+        far above any cap) with an undecodable IDAT — no 1.2GB allocation. """
+        import io
+        import struct
+        import zlib
+
+        def fake_bomb(w, h):
+            sig = b"\x89PNG\r\n\x1a\n"
+            ihdr_data = struct.pack(">II5B", w, h, 8, 2, 0, 0, 0)
+            ihdr = struct.pack(
+                ">I", 13) + b"IHDR" + ihdr_data + struct.pack(
+                ">I", zlib.crc32(b"IHDR" + ihdr_data) & 0xffffffff)
+            z = zlib.compress(b"\x00")
+            idat_data = b"IDAT" + z
+            idat = struct.pack(">I", len(z)) + idat_data + struct.pack(
+                ">I", zlib.crc32(idat_data) & 0xffffffff)
+            iend_data = b"IEND"
+            iend = struct.pack(">I", 0) + iend_data + struct.pack(
+                ">I", zlib.crc32(iend_data) & 0xffffffff)
+            return sig + ihdr + idat + iend
+
+        with pytest.raises(ValueError):
+            services.assert_image_dimensions(fake_bomb(20000, 20000))
+
 
 @pytest.mark.security
 class TestPathSafety:

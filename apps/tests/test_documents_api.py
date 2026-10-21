@@ -136,6 +136,30 @@ class TestEncryptEndpoint:
         assert r.status_code == 201
         assert body["needs_review"] is True and body["warnings"]
 
+    def test_mrz_passport_number_encrypted_not_discarded(self, store, monkeypatch):
+        """A valid TD3 MRZ passport must encrypt the MRZ passport number into
+        nric_encrypted (the profile ic_encrypted column receives it). With
+        needs_review False (OCR confidence ok) a discarded number would leave
+        the document stored with NO id number and no reviewer flag."""
+        fake = MagicMock()
+        fake.ocr.return_value = [{
+            "rec_texts": [
+                "P<MYSTAN<<MEI<LING<<<<<<<<<<<<<<<<<<<<<<<<<<",
+                "A123456784MYS8501020F3001318ZE184736B<<<<<30",
+            ],
+            "rec_scores": [0.95, 0.95],
+        }]
+        monkeypatch.setattr(services, "_get_ocr", lambda: fake)
+        r = Client().post(
+            "/ai/documents/encrypt",
+            data={"document": SimpleUploadedFile("pp.png", _make_png()), "user_id": USER},
+            **_h())
+        body = r.json()
+        assert r.status_code == 201, body
+        assert body["nric_encrypted"], body
+        assert json.loads(body["nric_encrypted"])["ver"] == 2
+        assert body["needs_review"] is False
+
 
 @pytest.mark.security
 class TestEncryptIcEndpoint:
@@ -172,6 +196,12 @@ class TestEncryptIcEndpoint:
 
     def test_passport_too_long_reject(self, store):
         assert self._post({"ic_number": "A1234567890123456", "user_id": USER}).status_code == 422
+
+    def test_non_string_dob_400(self, store):
+        assert self._post({"ic_number": "010101-14-5123", "user_id": USER, "dob": 20010101}).status_code == 400
+
+    def test_non_string_gender_400(self, store):
+        assert self._post({"ic_number": "010101-14-5123", "user_id": USER, "gender": ["male"]}).status_code == 400
 
 
 @pytest.mark.security

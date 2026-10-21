@@ -62,6 +62,19 @@ class TestParseTd3:
         assert parse_td3("KAD PENGENALAN TAN 900101-14-5123") is None
         assert parse_td3("") is None
 
+    def test_non_digit_date_does_not_crash(self):
+        """OCR commonly reads 0 as O. The date slices may therefore contain
+        letters; parse_td3 must record undecipherable_date in errors instead
+        of raising ValueError (which surfaces as an unhandled HTTP 500)."""
+        bad_birth = SAMPLE.replace("850102", "8S0102")
+        bad_expiry = SAMPLE.replace("300131", "3001S1")
+        for line2 in (bad_birth, bad_expiry):
+            r = parse_td3(line2)
+            assert r is not None, line2
+            assert r["passport_number"] == "A12345678", r
+            assert "undecipherable_date" in r["errors"], r
+            assert r["date_of_birth"] is None or isinstance(r["date_of_birth"], str)
+
     def test_fragments_with_noise_between_lines_still_parse(self):
         noisy = "P<MYSTAN<<MEI<LING<<<<<<<<<<<<<<<<<<<<<<<<<<\nJUNKFIELD\n" + SAMPLE.split("\n")[1]
         r = parse_td3(noisy)
