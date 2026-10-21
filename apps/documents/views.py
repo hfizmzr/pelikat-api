@@ -1,30 +1,64 @@
 """
 Document Views
+
+All responses keep the frontend (BFF) contract:
+201 → {"status": "ok", ...}
 """
 
-import base64
+import logging
 import re
-from rest_framework.decorators import api_view
+import uuid
+
+from rest_framework.decorators import api_view, throttle_classes
 from rest_framework.response import Response
-from .services import encrypt_document, decrypt_document, delete_document, validate_document
-from .services import _encrypt_ic_number
+from rest_framework.throttling import AnonRateThrottle
+
+from .nric import NRIC_RE, validate_nric
+from .services import (
+    MAX_UPLOAD_BYTES,
+    _encrypt_ic_number,
+    assert_image_dimensions,
+    delete_document,
+    encrypt_document,
+    is_safe_document_path,
+    sniff_image_mime,
+    validate_document,
+)
+from .throttling import UserScopedRateThrottle
+
+logger = logging.getLogger(__name__)
+
+_THROTTLES = [UserScopedRateThrottle, AnonRateThrottle]
+_PASSPORT_RE = r"^[A-Za-z0-9]{5,15}$"
+
+
+def _is_uuid(value) -> bool:
+    try:
+        uuid.UUID(str(value))
+    except (ValueError, AttributeError):
+        return False
+    return True
 
 
 @api_view(["POST"])
+@throttle_classes(_THROTTLES)
 def encrypt_view(request):
     """
-    POST /ai/documents/encrypt
+    POST /ai/documents/encrypt (multipart/form-data)
 
-    Request (multipart/form-data):
-      document:  image file (JPEG/PNG/WebP)
-      user_id:   uuid string
+      document:  image file (JPEG/PNG/WebP, max 10MB)
+      user_id:   uuid string — storage path is built from this, never
+                 taken from any client path field
+      [dob]:     optional ISO YYYY-MM-DD (BFF-passed profile DOB)
+      [gender]:  optional "male"/"female" for NRIC cross-check
 
-    Flow:
-      1. Validate document in memory via OCR (no bytes touch storage)
-      2. If validation fails → 422 with structured rejection reason
-      3. If low-confidence match → 201 with warning flag
-      4. Encrypt with AES-256-GCM → upload encrypted blob → delete raw temp
-      5. Return { encrypted_path, iv, tag, [warning] }
+    201 → {"status": "ok",
+           "document_path": "{user_id}/{ts}.enc",
+           "document_mime": sniffed mime,
+           "uploaded_at": iso8601,
+           "nric_encrypted": v2 envelope JSON string | null,
+           "needs_review": bool,
+           "warnings": [...]}
     """
     uploaded = request.FILES.get("document")
     user_id = request.data.get("user_id")
@@ -32,111 +66,158 @@ def encrypt_view(request):
     if not uploaded or not user_id:
         return Response({"error": "document and user_id are required"}, status=400)
 
-    file_bytes = uploaded.read()
-    uploaded.seek(0)
+    if not _is_uuid(user_id):
+        return Response({"error": "user_id must be a UUID"}, status=400)
 
-    validation = validate_document(file_bytes)
+    declared = request.headers.get("Content-Length")
+    if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES + 1024:
+        return Response(
+            {"error": "Document exceeds the 10MB limit. Please upload a smaller photo."},
+            status=413)
+
+    # Stream-read with a hard byte cap BEFORE assembling the full buffer.
+    # (also rejects File objects whose declared size lies — no memory bomb)
+    file_parts: list[bytes] = []
+    total = 0
+    while True:
+        chunk = uploaded.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            return Response(
+                {"error": "Document exceeds the 10MB limit. Please upload a smaller photo."},
+                status=413)
+        file_parts.append(chunk)
+    file_bytes = b"".join(file_parts)
+
+    mime = sniff_image_mime(file_bytes)
+    if not mime:
+        return Response(
+            {"error": "Unsupported file type. Please upload a JPEG, PNG or WebP photo."},
+            status=415)
+
+    try:
+        assert_image_dimensions(file_bytes)
+    except ValueError as e:
+        logger.info("image dimension cap rejected (user=%s): %s", user_id, e)
+        return Response({"error": str(e)}, status=413)
+
+    dob = request.data.get("dob") or None
+    gender = request.data.get("gender") or None
+    if dob and not isinstance(dob, str):
+        return Response({"error": "dob must be a string"}, status=400)
+    if gender and not isinstance(gender, str):
+        return Response({"error": "gender must be a string"}, status=400)
+
+    validation = validate_document(file_bytes, dob=dob, gender=gender)
 
     if not validation["is_valid"]:
         return Response({"error": validation["reason"]}, status=422)
 
     try:
-        result = encrypt_document(file_bytes, user_id, validation.get("ic_number"))
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
+        result = encrypt_document(file_bytes, user_id, validation.get("nric"))
+    except Exception:
+        logger.exception("encrypt_document failed for user %s", user_id)
+        return Response(
+            {"error": "Could not store the encrypted document. Please try again later."},
+            status=500)
 
-    if validation.get("needs_review"):
-        return Response({**result, "warning": validation["reason"]}, status=201)
-
-    return Response(result, status=201)
+    warnings = list(validation.get("warnings") or [])
+    return Response({
+        "status": "ok",
+        "document_path": result["document_path"],
+        "document_mime": mime,
+        "uploaded_at": result["uploaded_at"],
+        "nric_encrypted": result.get("nric_encrypted"),
+        "needs_review": bool(validation.get("needs_review")) or bool(warnings),
+        "warnings": warnings,
+    }, status=201)
 
 
 @api_view(["POST"])
+@throttle_classes(_THROTTLES)
 def encrypt_ic_view(request):
     """
-    POST /ai/documents/encrypt-ic
+    POST /ai/documents/encrypt-ic (JSON)
 
-    Request (JSON):
-      { "ic_number": "900101-14-5123", "user_id": "uuid" }
+      {"ic_number": "900101-14-5123", "user_id": uuid,
+       ["dob": iso-date, "gender": male|female]}
 
-    Manual-entry fallback for runners without an IC photo.
-    Encrypts the IC/Passport number with AES-256-GCM (same key as
-    document encryption) and returns only the ciphertext.
+    Manual-entry fallback for runners without an IC photo. Valid NRICs
+    get the full canonical rule-set; explicit DOB mismatches hard-reject.
+    Non-NRIC values are passports: loose alnum format only (an OCR MRZ
+    cannot be verified on manual entry → needs_review).
+
+    201 → {"status": "ok", "ic_encrypted": v2 envelope JSON string,
+           "needs_review": bool, "warnings": [...]}
     """
     ic_number = request.data.get("ic_number")
     user_id = request.data.get("user_id")
+    dob = request.data.get("dob") or None
+    gender = request.data.get("gender") or None
 
     if not ic_number or not user_id:
         return Response({"error": "ic_number and user_id are required"}, status=400)
+    if not _is_uuid(user_id):
+        return Response({"error": "user_id must be a UUID"}, status=400)
     if not isinstance(ic_number, str):
         return Response({"error": "ic_number must be a string"}, status=422)
     ic_number = ic_number.strip()
 
-    if not re.fullmatch(r"[A-Za-z0-9-]{5,20}", ic_number):
+    warnings: list[str] = []
+    needs_review = False
+
+    if NRIC_RE.fullmatch(ic_number):
+        # NRIC shape → full canonical rule-set.
+        outcome = validate_nric(ic_number, dob=dob, gender=gender)
+        if not outcome["valid"]:
+            return Response({"error": outcome["reason"]}, status=422)
+        warnings.extend(outcome["warnings"])
+        needs_review = bool(warnings)
+    elif not re.fullmatch(_PASSPORT_RE, ic_number):
         return Response({"error": "Invalid IC/Passport number format"}, status=422)
+    else:
+        # Loose-format passport entry has no MRZ verification → review.
+        warnings.append("Passport number accepted on format only — no MRZ present to verify.")
+        needs_review = True
 
-    return Response({"ic_encrypted": _encrypt_ic_number(ic_number)}, status=201)
-
-
-@api_view(["POST"])
-def decrypt_view(request):
-    """
-    POST /ai/documents/decrypt
-
-    Request:
-      { "encrypted_path": "{user_id}/{ts}.enc",
-        "iv": "<base64>",
-        "tag": "<base64>",
-        "user_id": "uuid" }
-
-    Response:
-      { "image": "<base64-encoded decrypted image>",
-        "mime": "image/jpeg" }
-
-    Security:
-      - Decryption happens in memory only
-      - The image is returned as a base64 string, never persisted to disk
-      - Only admin JWT roles should call this; caller must enforce RBAC
-    """
-    encrypted_path = request.data.get("encrypted_path")
-    iv_b64 = request.data.get("iv")
-    tag_b64 = request.data.get("tag")
-    user_id = request.data.get("user_id")
-
-    if not all([encrypted_path, iv_b64, tag_b64, user_id]):
-        return Response(
-            {"error": "encrypted_path, iv, tag, and user_id are required"},
-            status=400,
-        )
-
-    try:
-        plaintext = decrypt_document(encrypted_path, iv_b64, tag_b64, user_id)
-        return Response({
-            "image": base64.b64encode(plaintext).decode("utf-8"),
-            "mime": "image/jpeg",
-        })
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
+    return Response({
+        "status": "ok",
+        "ic_encrypted": _encrypt_ic_number(ic_number, user_id),
+        "needs_review": needs_review,
+        "warnings": warnings,
+    }, status=201)
 
 
 @api_view(["POST"])
+@throttle_classes(_THROTTLES)
 def delete_view(request):
     """
-    POST /ai/documents/delete
-
-    Request:
-      { "encrypted_path": "{user_id}/{ts}.enc" }
+    POST /ai/documents/delete (JSON)
+      {"user_id": uuid, "encrypted_path": "{user_id}/{ts}.enc"}
 
     Used during account deletion to remove the encrypted IC document
-    before anonymizing the profile.
+    before anonymizing the profile. The path MUST live under the
+    caller's user_id prefix (IDOR/traversal otherwise 403).
     """
+    user_id = request.data.get("user_id")
     encrypted_path = request.data.get("encrypted_path")
 
-    if not encrypted_path:
-        return Response({"error": "encrypted_path is required"}, status=400)
+    if not user_id or not encrypted_path:
+        return Response({"error": "user_id and encrypted_path are required"}, status=400)
+
+    if not _is_uuid(user_id):
+        return Response({"error": "user_id must be a UUID"}, status=400)
+
+    if not is_safe_document_path(encrypted_path, user_id):
+        return Response({"error": "Forbidden"}, status=403)
 
     try:
         delete_document(encrypted_path)
         return Response({"deleted": True})
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
+    except Exception:
+        logger.exception("delete_document failed for user %s path %s", user_id, encrypted_path)
+        return Response(
+            {"error": "Could not delete the document. Please try again later."},
+            status=500)

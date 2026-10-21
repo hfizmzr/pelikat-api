@@ -29,7 +29,8 @@ class InternalKeyMiddleware:
     def __call__(self, request):
         if _requires_internal_key(request.path):
             key = request.headers.get('X-Internal-Key', '')
-            # L1: constant-time comparison (timing-attack safe).
-            if not hmac.compare_digest(key, settings.INTERNAL_API_KEY or ''):
+            # L1: constant-time comparison (timing-attack safe). Fail-closed:
+            # empty/missing header always rejected, no DEBUG fallback.
+            if not key or not hmac.compare_digest(key, settings.INTERNAL_API_KEY):
                 return JsonResponse({'error': 'Unauthorized'}, status=401)
         return self.get_response(request)

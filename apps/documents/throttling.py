@@ -1,0 +1,31 @@
+"""
+Throttling for the internal IC/passport endpoints.
+
+Every request arrives from the BFF host, so throttling on REMOTE_ADDR
+alone would rate-limit all users as one bucket. The scoped throttle
+keys on the caller's user id (header or request body) and falls back
+to the forwarded client IP.
+"""
+
+from rest_framework.throttling import SimpleRateThrottle
+
+
+class UserScopedRateThrottle(SimpleRateThrottle):
+    scope = "ic_documents"  # rate from REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']
+
+    def get_cache_key(self, request, view):
+        user_id = request.headers.get("X-User-Id")
+        if not user_id:
+            from rest_framework.exceptions import ParseError
+            try:
+                user_id = request.data.get("user_id")
+            except ParseError:
+                user_id = None
+        if isinstance(user_id, str) and user_id.strip():
+            ident = user_id.strip()
+        else:
+            ident = (
+                request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+                or request.META.get("REMOTE_ADDR", "")
+            )
+        return self.cache_format % {"scope": self.scope, "ident": ident}

@@ -30,11 +30,12 @@ def test_missing_internal_key_raises_when_debug_false(monkeypatch):
         _load_fresh_settings(monkeypatch)
 
 
-def test_missing_internal_key_ok_when_debug_true(monkeypatch):
+def test_missing_internal_key_raises_even_when_debug_true(monkeypatch):
+    """Critical #5: fail-closed in ALL modes — empty key could never boot."""
     monkeypatch.delenv('INTERNAL_API_KEY', raising=False)
     monkeypatch.setenv('DEBUG', '1')
-    namespace = _load_fresh_settings(monkeypatch)
-    assert namespace['INTERNAL_API_KEY'] == ''
+    with pytest.raises(ImproperlyConfigured, match='INTERNAL_API_KEY'):
+        _load_fresh_settings(monkeypatch)
 
 
 def test_internal_key_set_ok_when_debug_false(monkeypatch):
