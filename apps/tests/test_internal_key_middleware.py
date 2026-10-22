@@ -30,6 +30,17 @@ class TestInternalKeyMiddleware:
         assert response.status_code == 401
         assert response.json()['error'] == 'Unauthorized'
 
+    def test_non_ascii_key_returns_401_not_500(self, api_client):
+        """Non-ASCII header (latin-1 decoded by WSGI) must 401, not raise
+        TypeError from compare_digest(str, str)."""
+        response = api_client.post(
+            '/ai/qr/sign',
+            data={'runner_id': 'test', 'event_id': 'test', 'bib_number': 'A001'},
+            content_type='application/json',
+            HTTP_X_INTERNAL_KEY='café'
+        )
+        assert response.status_code == 401
+
     def test_correct_key_allows_access(self, api_client, internal_api_key):
         """Request with correct X-Internal-Key header passes through."""
         response = api_client.post(

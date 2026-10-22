@@ -56,17 +56,30 @@ DATABASES = {}
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [],
     'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.AllowAny'],
+    # Rates consumed by the view-level throttle classes (apps/documents).
+    # ic_documents keys on the caller's user id; anon is a wider fallback
+    # keyed on the request IP (all traffic arrives via the BFF host).
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '120/hour',
+        'ic_documents': '10/hour',
+    },
 }
+
+# Multipart/body hard caps for the IC upload path (guardrails mirrored in
+# apps/documents/views.py checks).
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 
 HMAC_SECRET = os.environ.get('HMAC_SECRET', '')
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
 SUPABASE_JWT_SECRET = os.environ.get('SUPABASE_JWT_SECRET', '')
+# Fail-closed (Critical #5): an empty internal API key must never boot,
+# even under DEBUG — an empty key would make the middleware pass everyone.
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY', '')
-
-if not INTERNAL_API_KEY and not DEBUG:
+if not INTERNAL_API_KEY:
     raise ImproperlyConfigured(
-        'INTERNAL_API_KEY must be set when DEBUG is False')
+        'INTERNAL_API_KEY must be set (empty keys are rejected in all modes)')
 DOCUMENT_ENCRYPTION_KEY = os.environ.get('DOCUMENT_ENCRYPTION_KEY', '')
 HITPAY_API_URL = os.environ.get('HITPAY_API_URL', '')
 HITPAY_API_KEY = os.environ.get('HITPAY_API_KEY', '')

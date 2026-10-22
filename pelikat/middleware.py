@@ -29,7 +29,13 @@ class InternalKeyMiddleware:
     def __call__(self, request):
         if _requires_internal_key(request.path):
             key = request.headers.get('X-Internal-Key', '')
-            # L1: constant-time comparison (timing-attack safe).
-            if not hmac.compare_digest(key, settings.INTERNAL_API_KEY or ''):
+            # L1: constant-time comparison (timing-attack safe). Fail-closed:
+            # empty/missing header always rejected, no DEBUG fallback.
+            # Compare as bytes: WSGI headers are latin-1 decoded, so a
+            # non-ASCII X-Internal-Key would make compare_digest(str, str)
+            # raise TypeError (→ 500) instead of failing as 401.
+            if not key or not hmac.compare_digest(
+                    key.encode('utf-8'),
+                    str(settings.INTERNAL_API_KEY).encode('utf-8')):
                 return JsonResponse({'error': 'Unauthorized'}, status=401)
         return self.get_response(request)
