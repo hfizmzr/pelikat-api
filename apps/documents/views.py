@@ -9,11 +9,11 @@ import logging
 import re
 import uuid
 
-from rest_framework.decorators import api_view, throttle_classes
+from rest_framework.decorators import api_view, parser_classes, throttle_classes
 from rest_framework.response import Response
-from rest_framework.throttling import AnonRateThrottle
 
 from .nric import NRIC_RE, validate_nric
+from .parsers import BoundedMultiPartParser
 from .services import (
     MAX_UPLOAD_BYTES,
     _encrypt_ic_number,
@@ -28,7 +28,11 @@ from .throttling import UserScopedRateThrottle
 
 logger = logging.getLogger(__name__)
 
-_THROTTLES = [UserScopedRateThrottle, AnonRateThrottle]
+# Anonymous throttle intentionally excluded: every request here is anonymous
+# (internal-key middleware, no auth classes), so a shared "anon" bucket would
+# rate-limit ALL BFF traffic collectively during registration peak. The
+# UserScopedRateThrottle already keys per user id / forwarded client IP.
+_THROTTLES = [UserScopedRateThrottle]
 _PASSPORT_RE = r"^[A-Za-z0-9]{5,15}$"
 
 
@@ -41,6 +45,7 @@ def _is_uuid(value) -> bool:
 
 
 @api_view(["POST"])
+@parser_classes([BoundedMultiPartParser])
 @throttle_classes(_THROTTLES)
 def encrypt_view(request):
     """
@@ -99,9 +104,13 @@ def encrypt_view(request):
 
     try:
         assert_image_dimensions(file_bytes)
-    except ValueError as e:
-        logger.info("image dimension cap rejected (user=%s): %s", user_id, e)
-        return Response({"error": str(e)}, status=413)
+    except ValueError:
+        # Details stay in the log only — echoing exception text to the
+        # client would leak stack/internal info (CodeQL py/stack-trace-exposure).
+        logger.info("image validation rejected (user=%s)", user_id)
+        return Response(
+            {"error": "Image is too large or unreadable. Please upload a smaller, valid photo."},
+            status=413)
 
     dob = request.data.get("dob") or None
     gender = request.data.get("gender") or None

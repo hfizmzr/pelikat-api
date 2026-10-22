@@ -134,6 +134,14 @@ class TestUploadGuardrails:
         with pytest.raises(ValueError):
             services.assert_image_dimensions(fake_bomb(20000, 20000))
 
+    def test_truncated_image_maps_to_value_error(self):
+        """Valid JPEG magic bytes + garbage payload: sniff passes, but Pillow
+        fails to decode (UnidentifiedImageError/OSError). Must surface as the
+        contract ValueError (→ HTTP 4xx), never as an unhandled 500."""
+        jpeg_garbage = b"\xff\xd8\xff\xe0" + b"not-really-a-jpeg" * 10
+        with pytest.raises(ValueError):
+            services.assert_image_dimensions(jpeg_garbage)
+
 
 @pytest.mark.security
 class TestPathSafety:

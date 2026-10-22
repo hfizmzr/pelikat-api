@@ -173,6 +173,14 @@ def assert_image_dimensions(data: bytes) -> None:
         raise ValueError(
             "Image is too large. Please upload a photo of at most 24 megapixels."
         ) from exc
+    except (Image.UnidentifiedImageError, OSError, SyntaxError) as exc:
+        # Truncated/corrupt images that pass the magic-byte sniff still fail
+        # Pillow's header parse. Map to our contract error (→ HTTP 4xx),
+        # never let the OS-level error escape as an HTTP 500.
+        logger.warning("undecodable image rejected: %s", exc)
+        raise ValueError(
+            "Could not decode the uploaded image. Please upload a valid photo."
+        ) from exc
     if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
         raise ValueError(
             "Image is too large. Please upload a photo of at most 8000×8000 pixels.")
