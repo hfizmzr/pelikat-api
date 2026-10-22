@@ -333,7 +333,7 @@ def encrypt_document(file_bytes: bytes, user_id: str, nric: str | None = None) -
     sb.storage.from_(BUCKET).upload(
         path=encrypted_path,
         file=envelope,
-        file_options={"content-type": "application/json", "upsert": "true"},
+        file_options={"content-type": "application/octet-stream", "upsert": "true"},
     )
 
     result: dict = {

@@ -34,7 +34,7 @@ class TestV2Envelope:
         envelope = json.loads(kwargs["file"].decode())
         assert envelope["ver"] == 2
         assert set(envelope) == {"ver", "iv", "ct", "tag"}
-        assert kwargs["file_options"]["content-type"] == "application/json"
+        assert kwargs["file_options"]["content-type"] == "application/octet-stream"
         assert kwargs["path"] == result["document_path"]
         assert result["document_path"].startswith(USER + "/")
         assert "T" in result["uploaded_at"]  # iso8601
