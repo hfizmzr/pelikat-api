@@ -226,6 +226,17 @@ class TestEncryptIcEndpoint:
     def test_non_string_gender_400(self, store):
         assert self._post({"ic_number": "010101-14-5123", "user_id": USER, "gender": ["male"]}).status_code == 400
 
+    def test_array_body_400_not_500(self):
+        # Non-mapping JSON bodies must hit the missing-field 400 path.
+        r = Client().post("/ai/documents/encrypt-ic", data=json.dumps([1]),
+                          content_type="application/json", **_h())
+        assert r.status_code == 400
+
+    def test_null_body_400_not_500(self):
+        r = Client().post("/ai/documents/encrypt-ic", data=json.dumps(None),
+                          content_type="application/json", **_h())
+        assert r.status_code == 400
+
 
 @pytest.mark.security
 class TestDeleteEndpoint:
@@ -254,6 +265,17 @@ class TestDeleteEndpoint:
     def test_missing_user_id_400(self, store):
         r = Client().post("/ai/documents/delete",
                           data=json.dumps({"encrypted_path": f"{USER}/1.enc"}),
+                          content_type="application/json", **_h())
+        assert r.status_code == 400
+
+    def test_array_body_400_not_500(self):
+        # Non-mapping JSON bodies must hit the missing-field 400 path.
+        r = Client().post("/ai/documents/delete", data=json.dumps([1]),
+                          content_type="application/json", **_h())
+        assert r.status_code == 400
+
+    def test_null_body_400_not_500(self):
+        r = Client().post("/ai/documents/delete", data=json.dumps(None),
                           content_type="application/json", **_h())
         assert r.status_code == 400
 

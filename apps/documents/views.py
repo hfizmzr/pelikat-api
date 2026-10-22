@@ -167,10 +167,13 @@ def encrypt_ic_view(request):
     201 → {"status": "ok", "ic_encrypted": v2 envelope JSON string,
            "needs_review": bool, "warnings": [...]}
     """
-    ic_number = request.data.get("ic_number")
-    user_id = request.data.get("user_id")
-    dob = request.data.get("dob") or None
-    gender = request.data.get("gender") or None
+    # Non-mapping JSON bodies (array/null) must fall through to the
+    # missing-field 400, not AttributeError → 500 (same guard as throttling).
+    data = request.data if isinstance(request.data, dict) else {}
+    ic_number = data.get("ic_number")
+    user_id = data.get("user_id")
+    dob = data.get("dob") or None
+    gender = data.get("gender") or None
     if dob and not isinstance(dob, str):
         return Response({"error": "dob must be a string"}, status=400)
     if gender and not isinstance(gender, str):
@@ -220,8 +223,9 @@ def delete_view(request):
     before anonymizing the profile. The path MUST live under the
     caller's user_id prefix (IDOR/traversal otherwise 403).
     """
-    user_id = request.data.get("user_id")
-    encrypted_path = request.data.get("encrypted_path")
+    data = request.data if isinstance(request.data, dict) else {}
+    user_id = data.get("user_id")
+    encrypted_path = data.get("encrypted_path")
 
     if not user_id or not encrypted_path:
         return Response({"error": "user_id and encrypted_path are required"}, status=400)
