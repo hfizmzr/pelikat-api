@@ -24,6 +24,8 @@ from django.test import Client
 from PIL import Image
 
 from apps.documents import services, views
+from apps.documents.mrz import parse_td3
+from apps.documents.throttling import UserScopedRateThrottle
 
 USER = "11111111-1111-1111-1111-111111111111"
 OTHER = "22222222-2222-2222-2222-222222222222"
@@ -160,6 +162,27 @@ class TestEncryptEndpoint:
         assert json.loads(body["nric_encrypted"])["ver"] == 2
         assert body["needs_review"] is False
 
+    def test_mrz_truncated_composite_rejected_422(self, store, monkeypatch):
+        """Composite check digit literally '<' (OCR truncated the TD3 tail):
+        the MRZ cannot be verified, so the upload must be hard-rejected
+        (422) through the full API path — not accepted with an unverifiable
+        passport number just because every parsed check digit happens to
+        pass."""
+        l1 = "P<MYSTAN<<MEI<LING<<<<<<<<<<<<<<<<<<<<<<<<<<"
+        l2 = "A123456784MYS8501020F3001318ZE184736B<<<<<3<"  # [43] = '<'
+        parsed = parse_td3(f"{l1}\n{l2}")
+        assert parsed["truncated"] and not parsed["errors"], parsed
+        fake = MagicMock()
+        fake.ocr.return_value = [{"rec_texts": [l1, l2],
+                                  "rec_scores": [0.95, 0.95]}]
+        monkeypatch.setattr(services, "_get_ocr", lambda: fake)
+        r = Client().post(
+            "/ai/documents/encrypt",
+            data={"document": SimpleUploadedFile("pp.png", _make_png()), "user_id": USER},
+            **_h())
+        assert r.status_code == 422, r.json()
+        assert "MRZ" in r.json()["error"]
+
 
 @pytest.mark.security
 class TestEncryptIcEndpoint:
@@ -270,6 +293,61 @@ class TestThrottle:
             data={"document": SimpleUploadedFile("ic.png", _make_png()), "user_id": OTHER},
             **_h())
         assert r.status_code == 201
+
+    def test_header_rotation_cannot_dodge_body_keyed_throttle(self, store, ocr):
+        """Rotating X-User-Id headers must not mint fresh buckets: the
+        throttle keys on the BODY user_id (the identity the upload is
+        stored under), so 11 uploads with the same body user_id hit the
+        same bucket and the 11th is throttled."""
+        statuses = []
+        for i in range(11):
+            r = Client(**_h({"HTTP_X_USER_ID": f"rotated-{i}"})).post(
+                "/ai/documents/encrypt",
+                data={"document": SimpleUploadedFile("ic.png", _make_png()),
+                      "user_id": USER},
+                **_h())
+            statuses.append(r.status_code)
+        assert statuses[:10] == [201] * 10, statuses
+        assert statuses[10] == 429, statuses
+
+
+@pytest.mark.security
+class TestThrottleKeyGuard:
+    """get_cache_key must survive non-mapping bodies (JSON array/null/
+    string) and keep the key chain: body user_id → X-User-Id → client IP."""
+
+    @staticmethod
+    def _key(data, headers=None, meta=None):
+        from types import SimpleNamespace
+        req = SimpleNamespace(data=data, headers=headers or {},
+                              META=meta or {"REMOTE_ADDR": "10.0.0.1"})
+        return UserScopedRateThrottle().get_cache_key(req, None)
+
+    @pytest.mark.parametrize("data", [[], None, "str", 42])
+    def test_non_dict_body_falls_back_to_ip(self, data):
+        key = self._key(data)
+        assert key == "throttle_ic_documents_10.0.0.1", key
+
+    def test_parse_error_body_still_falls_back(self):
+        # Malformed JSON raises ParseError on access, not AttributeError;
+        # the header fallback must survive it.
+        from rest_framework.exceptions import ParseError
+
+        class _Req:
+            def __init__(self):
+                self.headers = {"X-User-Id": "h1"}
+                self.META = {"REMOTE_ADDR": "10.0.0.1"}
+
+            @property
+            def data(self):
+                raise ParseError()
+
+        assert UserScopedRateThrottle().get_cache_key(_Req(), None) == \
+            "throttle_ic_documents_h1"
+
+    def test_body_user_id_beats_rotated_header(self):
+        key = self._key({"user_id": "body-uid"}, headers={"X-User-Id": "hdr-uid"})
+        assert key == "throttle_ic_documents_body-uid", key
 
 
 @pytest.mark.security

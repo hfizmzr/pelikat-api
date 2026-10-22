@@ -19,7 +19,10 @@ class UserScopedRateThrottle(SimpleRateThrottle):
         # caller could rotate headers to dodge the per-user bucket.
         from rest_framework.exceptions import ParseError
         try:
-            user_id = request.data.get("user_id")
+            # Body may not be a mapping (JSON array/null, scalar) — `.get`
+            # on it raises AttributeError, not ParseError → 500.
+            data = request.data if isinstance(request.data, dict) else {}
+            user_id = data.get("user_id")
         except ParseError:
             user_id = None
         if not user_id:
