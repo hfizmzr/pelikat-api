@@ -263,7 +263,8 @@ def validate_document(file_bytes: bytes, *, dob: str | None = None,
     # number becomes the trusted value and its check digits must pass.
     mrz = parse_td3("\n".join(texts))
     if mrz is not None:
-        if mrz["errors"] or not passport_number_valid(mrz["passport_number"]):
+        if (mrz["errors"] or mrz.get("truncated")
+                or not passport_number_valid(mrz["passport_number"])):
             return {
                 "is_valid": False,
                 "needs_review": False,

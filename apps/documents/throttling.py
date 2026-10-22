@@ -14,13 +14,16 @@ class UserScopedRateThrottle(SimpleRateThrottle):
     scope = "ic_documents"  # rate from REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']
 
     def get_cache_key(self, request, view):
-        user_id = request.headers.get("X-User-Id")
+        # Key on the body user_id first: that is the identity the upload is
+        # stored under. Header X-User-Id is only a fallback — otherwise a
+        # caller could rotate headers to dodge the per-user bucket.
+        from rest_framework.exceptions import ParseError
+        try:
+            user_id = request.data.get("user_id")
+        except ParseError:
+            user_id = None
         if not user_id:
-            from rest_framework.exceptions import ParseError
-            try:
-                user_id = request.data.get("user_id")
-            except ParseError:
-                user_id = None
+            user_id = request.headers.get("X-User-Id")
         if isinstance(user_id, str) and user_id.strip():
             ident = user_id.strip()
         else:

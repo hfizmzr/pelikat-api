@@ -91,7 +91,6 @@ def parse_td3(text: str) -> dict | None:
             # a present-but-wrong one is hard evidence of a corrupt MRZ.
             if composite_cd != "<" and check_digit(composite_input) != composite_cd:
                 errors.append("composite_check_digit")
-
             birth_date = _resolve_date(birth, expiring=False, errors=errors)
             expiry_date = _resolve_date(expiry, expiring=True, errors=errors)
 
@@ -101,6 +100,9 @@ def parse_td3(text: str) -> dict | None:
                 "date_of_birth": birth_date,
                 "date_of_expiry": expiry_date,
                 "errors": errors,
+                # OCR truncated the composite check digit — identity must
+                # not be treated as clean even if all parsed fields passed.
+                "truncated": composite_cd == "<",
             }
     return None
 
