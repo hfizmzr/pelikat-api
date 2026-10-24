@@ -348,7 +348,7 @@ class TestThrottleKeyGuard:
     @pytest.mark.parametrize("data", [[], None, "str", 42])
     def test_non_dict_body_falls_back_to_ip(self, data):
         key = self._key(data)
-        assert key == "throttle_ic_documents_10.0.0.1", key
+        assert key == "throttle_ic_doc_upload_10.0.0.1", key
 
     def test_parse_error_body_still_falls_back(self):
         # Malformed JSON raises ParseError on access, not AttributeError;
@@ -365,11 +365,11 @@ class TestThrottleKeyGuard:
                 raise ParseError()
 
         assert UserScopedRateThrottle().get_cache_key(_Req(), None) == \
-            "throttle_ic_documents_h1"
+            "throttle_ic_doc_upload_h1"
 
     def test_body_user_id_beats_rotated_header(self):
         key = self._key({"user_id": "body-uid"}, headers={"X-User-Id": "hdr-uid"})
-        assert key == "throttle_ic_documents_body-uid", key
+        assert key == "throttle_ic_doc_upload_body-uid", key
 
 
 @pytest.mark.security
@@ -377,3 +377,91 @@ class TestMiddlewareFailClosed:
     def test_missing_header_401(self):
         r = Client().post("/ai/documents/encrypt", data={"user_id": USER})
         assert r.status_code == 401
+
+
+@pytest.mark.security
+class TestOcrDegrade:
+    """P1 graceful degradation: a Paddle std::exception (RuntimeError)
+    must never escape as a 500 — blob is still stored encrypted and the
+    201 contract carries needs_review + warnings=["ocr_failed"]."""
+
+    def _upload(self, **kw):
+        return Client(HTTP_X_USER_ID=USER).post(
+            "/ai/documents/encrypt",
+            data={"document": SimpleUploadedFile("ic.png", _make_png()),
+                  "user_id": USER},
+            **_h(**kw))
+
+    def test_degrade_when_retry_also_fails(self, store, ocr):
+        ocr.ocr.side_effect = RuntimeError("std::exception")
+        r = self._upload()
+        assert r.status_code == 201, r.status_code
+        body = r.json()
+        assert body["status"] == "ok"
+        assert body["needs_review"] is True
+        assert body["warnings"] == ["ocr_failed"]
+        assert body["nric_encrypted"] is None
+        # Blob stored + decryptable (AEAD v2 round-trip intact).
+        assert body["document_path"] in store
+
+    def test_reinit_retry_succeeds(self, store, monkeypatch):
+        bad = MagicMock()
+        bad.ocr.side_effect = RuntimeError("std::exception")
+        good = MagicMock()
+        good.ocr.return_value = [{
+            "rec_texts": ["KAD PENGENALAN", "TAN MEI LING 010101-14-5123", "MALAYSIA"],
+            "rec_scores": [0.95, 0.95, 0.95],
+        }]
+        monkeypatch.setattr(services, "_ocr", None)
+        monkeypatch.setattr(services, "_get_ocr", iter([bad, good]).__next__)
+        r = self._upload()
+        assert r.status_code == 201
+        body = r.json()
+        assert body["needs_review"] is False
+        assert body["warnings"] == []
+        assert body["document_path"] in store
+        monkeypatch.setattr(services, "_ocr", None)
+
+    def test_json_guarantee_for_unhandled_exception(self, store, ocr,
+                                                    monkeypatch):
+        # /ai/* must NEVER leak a Django HTML 500 page; the global DRF
+        # exception handler renders {"error": ...} JSON.
+        def _boom(*a, **k):
+            raise RuntimeError("unexpected paddle crash")
+        monkeypatch.setattr(views, "validate_document", _boom)
+        r = self._upload()
+        assert r.status_code == 500
+        assert r["Content-Type"].startswith("application/json")
+        assert r.json() == {"error": "Internal server error"}
+
+
+@pytest.mark.security
+class TestThrottleScopes:
+    """P2 scope split: deletes get a separate 30/h budget."""
+
+    def _delete(self):
+        return Client(HTTP_X_USER_ID=USER).post(
+            "/ai/documents/delete",
+            data=json.dumps({"user_id": USER, "encrypted_path": f"{USER}/1.enc"}),
+            content_type="application/json", **_h())
+
+    def test_11th_delete_within_hour_not_throttled(self, store, ocr):
+        statuses = [self._delete().status_code for _ in range(11)]
+        assert all(s != 429 for s in statuses), statuses
+
+    def test_delete_throttled_at_31(self, store, ocr):
+        statuses = [self._delete().status_code for _ in range(31)]
+        assert statuses[:30] == [200] * 30, statuses
+        assert statuses[30] == 429, statuses
+
+    def test_scope_isolation_delete_vs_upload(self, store, ocr):
+        for _ in range(30):
+            self._delete()
+        assert self._delete().status_code == 429
+        # Upload scope untouched by delete activity.
+        r = Client(HTTP_X_USER_ID=USER).post(
+            "/ai/documents/encrypt",
+            data={"document": SimpleUploadedFile("ic.png", _make_png()),
+                  "user_id": USER},
+            **_h())
+        assert r.status_code == 201, r.status_code
