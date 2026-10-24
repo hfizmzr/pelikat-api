@@ -68,7 +68,7 @@ All variable names/purposes (see `.env.example`; values are never committed):
 
 ## Endpoints
 
-All `/ai/*` and `/payments/*` endpoints require the `X-Internal-Key` header matching `INTERNAL_API_KEY` (validated by middleware in `pelikat/middleware.py`).
+All `/ai/*` and `/payments/*` endpoints require the `X-Internal-Key` header matching `INTERNAL_API_KEY` (validated by middleware in `pelikat/middleware.py`), except the HitPay webhook, which is signature-verified.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
