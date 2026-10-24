@@ -56,12 +56,16 @@ DATABASES = {}
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [],
     'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.AllowAny'],
+    # JSON always: even unhandled Exceptions render {"error": ...} for
+    # /ai/* (and payments/*) callers — no Django HTML 500 page.
+    'EXCEPTION_HANDLER': 'pelikat.exceptions.exception_handler',
     # Rates consumed by the view-level throttle classes (apps/documents).
     # ic_documents keys on the caller's user id; anon is a wider fallback
     # keyed on the request IP (all traffic arrives via the BFF host).
     'DEFAULT_THROTTLE_RATES': {
         'anon': '120/hour',
-        'ic_documents': '10/hour',
+        'ic_doc_upload': '10/hour',
+        'ic_doc_delete': '30/hour',
     },
 }
 

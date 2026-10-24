@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import posixpath
+import threading
 import time
 from datetime import UTC, datetime
 
@@ -28,12 +29,16 @@ import numpy as np
 # ── Paddle FLAGS must be set before any Paddle/PaddleOCR import ──
 # Disable MKLDNN, OneDNN, and PIR API to force the legacy CPU inference
 # path that works with PaddlePaddle 3.0.0 on CPU (PP-OCRv5_mobile models).
+# OMP threads=1: the predictor intermittently raised std::exception on
+# subsequent calls under concurrent intra-op threads (E2E evidence);
+# single-worker sync OCR needs no parallelism.
 os.environ.setdefault("FLAGS_use_mkldnn", "0")
 os.environ.setdefault("FLAGS_use_onednn", "0")
 os.environ.setdefault("FLAGS_enable_pir_api", "0")
 os.environ.setdefault("FLAGS_use_pir_api", "0")
 os.environ.setdefault("FLAGS_allocator_strategy", "naive_best_fit")
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
@@ -65,20 +70,48 @@ _KEYWORDS = [
 ]
 
 _ocr = None
+# All init/ocr access goes through one lock: Paddle predictors are not
+# thread-safe, and concurrent calls were a suspected std::exception source.
+_ocr_lock = threading.Lock()
+
+
+def _build_ocr():
+    from paddleocr import PaddleOCR
+    kwargs = {
+        "use_doc_orientation_classify": False,
+        "use_doc_unwarping": False,
+        "use_textline_orientation": False,
+        "text_detection_model_name": "PP-OCRv5_mobile_det",
+        "text_recognition_model_name": "en_PP-OCRv5_mobile_rec",
+    }
+    try:
+        # Belt-and-braces MKLDNN off at the API level too (env flag above
+        # covers the C++ side). Older/newer builds may not accept the kwarg.
+        return PaddleOCR(enable_mkldnn=False, **kwargs)
+    except TypeError:
+        return PaddleOCR(**kwargs)
 
 
 def _get_ocr():
     global _ocr
     if _ocr is None:
-        from paddleocr import PaddleOCR
-        _ocr = PaddleOCR(
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
-            text_detection_model_name="PP-OCRv5_mobile_det",
-            text_recognition_model_name="en_PP-OCRv5_mobile_rec",
-        )
+        _ocr = _build_ocr()
     return _ocr
+
+
+def run_ocr(image):
+    """Run one ocr pass under the class lock. If the predictor throws
+    mid-run (Paddle std::exception → RuntimeError), drop the stale
+    singleton, rebuild once, and retry a single time inside this request.
+    A retry failure propagates to the caller's graceful-degrade path."""
+    global _ocr
+    with _ocr_lock:
+        try:
+            return _get_ocr().ocr(image)
+        except Exception:
+            logger.exception("ocr.ocr() failed — reinitializing predictor once")
+            _ocr = None
+            return _get_ocr().ocr(image)
 
 
 def get_supabase_client():
@@ -224,7 +257,6 @@ def validate_document(file_bytes: bytes, *, dob: str | None = None,
     is present (MRZ is authoritative for passports and its check digits
     MUST pass, otherwise the upload is a hard reject).
     """
-    ocr = _get_ocr()
     nparr = np.frombuffer(file_bytes, np.uint8)
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if image is None:
@@ -233,7 +265,17 @@ def validate_document(file_bytes: bytes, *, dob: str | None = None,
             "needs_review": False,
             "reason": "Could not decode the uploaded image. Please upload a valid photo.",
         }
-    results = ocr.ocr(image)
+    try:
+        results = run_ocr(image)
+    except Exception:
+        # Paddle runtime failure that survived the controlled re-init
+        # retry. Never propagate as a 500: the blob is accepted and
+        # stored encrypted as usual, flagged for manual review. Deciding
+        # note (PDPA/audit): the runner uploaded the image; holding the
+        # AEAD-encrypted blob with needs_review=true is acceptable.
+        logger.exception("OCR unavailable — degrading to manual review")
+        return {"is_valid": True, "needs_review": True,
+                "warnings": ["ocr_failed"], "nric": None}
 
     texts: list[str] = []
     confidences: list[float] = []
