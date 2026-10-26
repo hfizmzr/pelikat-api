@@ -600,13 +600,46 @@ def create_payment(data: dict, _attempt: int = 0) -> tuple[int, dict]:
     provider_request_id = str(claim_row['provider_request_id'])
 
     if not claim_row.get('is_reservation'):
-        # M1: a pending PR already exists for this order — reuse it.
+        # M1: a pending PR already exists for this order — reuse it ONLY
+        # when its stored amount still matches the amount just resolved
+        # server-side (compare at 2dp, same tolerance as sentinel
+        # recovery). A price change (e.g. admin edits the organizer
+        # subscription price) otherwise keeps serving the STALE checkout
+        # amount until the pending row ages out. On mismatch: release the
+        # row ('expired' — a terminal status in 059's payments check, the
+        # same convention reconcile uses) and re-claim fresh so a new PR
+        # is created at the new amount. HitPay offers no void endpoint in
+        # our client, so the superseded PR is left to expire unpaid
+        # (harmless).
         existing = (sb.table('payments').select('*')
                     .eq('provider_request_id', provider_request_id)
                     .limit(1).execute())
         rows = existing.data or []
         if rows:
-            return _reuse_pending_payment(rows[0])
+            try:
+                same_amount = abs(Decimal(str(rows[0].get('amount')))
+                                  - Decimal(str(amount))) <= Decimal('0.01')
+            except (InvalidOperation, TypeError):
+                same_amount = False
+            if same_amount:
+                return _reuse_pending_payment(rows[0])
+            logger.warning(
+                'stale pending payment %s (amount=%s) mismatches current '
+                'price %s for order_type=%s — releasing it and creating a '
+                'fresh payment at the new amount',
+                provider_request_id, rows[0].get('amount'), amount,
+                order_type)
+            # Guarded release: the row must STILL be pending at this id
+            # (someone confirming/cancelling it concurrently makes the
+            # update match 0 rows; the re-claim below then behaves
+            # correctly either way).
+            sb.table('payments').update({'status': 'expired'}) \
+                .eq('provider_request_id', provider_request_id) \
+                .eq('status', 'pending').execute()
+            if _attempt >= 1:
+                return 409, {'error': 'Could not reserve a payment slot; '
+                                      'try again'}
+            return create_payment(data, _attempt=_attempt + 1)
         return 200, {'provider_request_id': provider_request_id,
                      'checkout_url': None, 'status': 'pending'}
 

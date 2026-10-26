@@ -400,6 +400,7 @@ class TestCreatePayment:
         endpoint."""
         payments = _pending_payment_table([{
             'provider_request_id': 'pr-old',
+            'amount': '50.00',  # matches the server-derived price → reuse
             'status': 'pending',
             'qr_code_data': {'qr_code': 'qr-1'},
         }])
@@ -423,6 +424,94 @@ class TestCreatePayment:
         assert body['provider_request_id'] == 'pr-old'
         assert body['checkout_url'] == 'https://checkout.hit-pay.com/old'
         assert body['qr_code'] == 'qr-1'
+        assert body['status'] == 'pending'
+        mock_create.assert_not_called()
+        payments.update.assert_not_called()
+
+    def test_create_idempotent_stale_amount_releases_and_creates_fresh(
+            self, api_client):
+        """Amount-aware reuse: a pending PR priced at the OLD amount (e.g.
+        an admin changed the organizer subscription price from 149 → 99)
+        must NOT keep serving the stale checkout. The stale row is released
+        ('expired', guarded to still-pending) and a fresh PR is created at
+        the CURRENT amount."""
+        payments = _table([{
+            'provider_request_id': 'pr-old',
+            'amount': '149.00',
+            'status': 'pending',
+            'qr_code_data': None,
+        }])
+        sb = _mock_sb(payments=payments)
+        # First claim → the stale existing pending row; after the guarded
+        # release, the re-claim grants a fresh reservation slot.
+        sb.rpc.return_value.execute.side_effect = [
+            MagicMock(data=[{'provider_request_id': 'pr-old',
+                             'is_reservation': False}]),
+            MagicMock(data=[{'provider_request_id': 'pending:sentinel-1',
+                             'is_reservation': True}]),
+        ]
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.create_payment_request',
+                   return_value={'id': 'pr-new', 'url': 'https://x',
+                                 'status': 'pending'}) as mock_create:
+            response = api_client.post(
+                '/payments/create',
+                data={
+                    'order_type': 'organizer_subscription',
+                    'organizer_id': '33333333-3333-3333-3333-333333333333',
+                    'amount': '99.00',
+                    'email': 'org@example.com', 'name': 'Organizer',
+                    'purpose': 'Organizer subscription',
+                    'redirect_url': 'https://web.example.com/organizer/payment',
+                },
+                content_type='application/json', **_auth(),
+            )
+        assert response.status_code == 201
+        body = response.json()
+        assert body['provider_request_id'] == 'pr-new'
+        # Fresh PR at the NEW amount (not the stale 149.00).
+        assert mock_create.call_args.args[0]['amount'] == '99.00'
+        update_payloads = [c.args[0] for c in payments.update.call_args_list]
+        assert {'status': 'expired'} in update_payloads
+        swap = next(u for u in update_payloads if 'provider_request_id' in u)
+        assert swap['provider_request_id'] == 'pr-new'
+        eqs = [c.args for c in payments.update.return_value.eq.call_args_list]
+        # The release guard targets the stale row by id + still-pending.
+        assert ('provider_request_id', 'pr-old') in eqs
+        assert ('provider_request_id', 'pending:sentinel-1') in eqs
+
+    def test_create_idempotent_equal_amount_reuse_preserved(self, api_client):
+        """Price unchanged (149.00 = 149.00): the pending PR is reused as
+        before — no release, no duplicate HitPay create."""
+        payments = _table([{
+            'provider_request_id': 'pr-old',
+            'amount': '149.00',
+            'status': 'pending',
+            'qr_code_data': None,
+        }])
+        sb = _mock_sb(payments=payments)
+        sb.rpc.return_value.execute.return_value = MagicMock(
+            data=[{'provider_request_id': 'pr-old', 'is_reservation': False}])
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.get_payment_request',
+                   return_value={'id': 'pr-old', 'url': 'https://x',
+                                 'status': 'pending'}), \
+             patch('apps.payments.services.create_payment_request') as mock_create:
+            response = api_client.post(
+                '/payments/create',
+                data={
+                    'order_type': 'organizer_subscription',
+                    'organizer_id': '33333333-3333-3333-3333-333333333333',
+                    'amount': '149.00',
+                    'email': 'org@example.com', 'name': 'Organizer',
+                    'purpose': 'Organizer subscription',
+                    'redirect_url': 'https://web.example.com/organizer/payment',
+                },
+                content_type='application/json', **_auth(),
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body['provider_request_id'] == 'pr-old'
         assert body['status'] == 'pending'
         mock_create.assert_not_called()
         payments.update.assert_not_called()
