@@ -85,6 +85,29 @@ def list_payment_requests(params: dict) -> list:
     return []
 
 
+def delete_payment_request(request_id: str) -> dict | None:
+    """DELETE /payment-requests/{id} — cancel an incomplete payment request.
+
+    Used when a locally-released stale checkout's remote PR must be voided
+    so its checkout URL cannot still be paid. The endpoint is published in
+    HitPay's v1 OpenAPI but undocumented in the classic docs; HitPay
+    answers 4xx (e.g. 404 unknown / 409 already-completed) for PRs it will
+    not void — callers treat ANY error as "leave it to the webhook" and
+    must not fail the surrounding flow. Returns the JSON body on 2xx, or
+    None on a 4xx/5xx (non-raising: `_raise` failure is swallowed).
+    """
+    response = httpx.delete(
+        f'{settings.HITPAY_API_URL}/payment-requests/{request_id}',
+        headers=_headers(),
+        timeout=20,
+    )
+    try:
+        _raise(response)
+    except HitPayError:
+        return None
+    return response.json() if response.content else None
+
+
 def create_refund(payment_id: str, amount: str) -> dict:
     """POST /refunds — refund a charge by its charge id (NOT the PR id)."""
     response = httpx.post(
