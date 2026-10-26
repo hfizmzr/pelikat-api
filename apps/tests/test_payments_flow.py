@@ -3,6 +3,7 @@ HitPay payments flow tests: create / status / refund / reconcile,
 plus internal-key middleware behaviour for the /payments/* surface.
 """
 import hashlib
+import hmac
 import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
@@ -453,7 +454,9 @@ class TestCreatePayment:
         with patch('apps.payments.services.get_sb', return_value=sb), \
              patch('apps.payments.services.create_payment_request',
                    return_value={'id': 'pr-new', 'url': 'https://x',
-                                 'status': 'pending'}) as mock_create:
+                                 'status': 'pending'}) as mock_create, \
+             patch('apps.payments.services.delete_payment_request'
+                   ) as mock_delete:
             response = api_client.post(
                 '/payments/create',
                 data={
@@ -479,6 +482,51 @@ class TestCreatePayment:
         # The release guard targets the stale row by id + still-pending.
         assert ('provider_request_id', 'pr-old') in eqs
         assert ('provider_request_id', 'pending:sentinel-1') in eqs
+        # The superseded remote PR is cancelled (best-effort) so the old
+        # checkout URL cannot still be paid after the local release.
+        mock_delete.assert_called_once_with('pr-old')
+
+    def test_create_stale_amount_delete_failure_is_tolerated(self, api_client):
+        """Cancelling the superseded PR is best-effort: a HitPay error
+        (e.g. 409 already-completed / timeout) must NOT fail the flow — the
+        fresh claim still happens and the webhook owns a late completion."""
+        payments = _table([{
+            'provider_request_id': 'pr-old',
+            'amount': '149.00',
+            'status': 'pending',
+            'qr_code_data': None,
+        }])
+        sb = _mock_sb(payments=payments)
+        sb.rpc.return_value.execute.side_effect = [
+            MagicMock(data=[{'provider_request_id': 'pr-old',
+                             'is_reservation': False}]),
+            MagicMock(data=[{'provider_request_id': 'pending:sentinel-1',
+                             'is_reservation': True}]),
+        ]
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch('apps.payments.services.create_payment_request',
+                   return_value={'id': 'pr-new', 'url': 'https://x',
+                                 'status': 'pending'}) as mock_create, \
+             patch('apps.payments.services.delete_payment_request',
+                   side_effect=HitPayError('already completed', None, 409)
+                   ) as mock_delete:
+            response = api_client.post(
+                '/payments/create',
+                data={
+                    'order_type': 'organizer_subscription',
+                    'organizer_id': '33333333-3333-3333-3333-333333333333',
+                    'amount': '99.00',
+                    'email': 'org@example.com', 'name': 'Organizer',
+                    'purpose': 'Organizer subscription',
+                    'redirect_url': 'https://web.example.com/organizer/payment',
+                },
+                content_type='application/json', **_auth(),
+            )
+        assert response.status_code == 201
+        assert mock_create.call_args.args[0]['amount'] == '99.00'
+        mock_delete.assert_called_once_with('pr-old')
+        update_payloads = [c.args[0] for c in payments.update.call_args_list]
+        assert {'status': 'expired'} in update_payloads
 
     def test_create_idempotent_equal_amount_reuse_preserved(self, api_client):
         """Price unchanged (149.00 = 149.00): the pending PR is reused as
@@ -1485,3 +1533,91 @@ class TestRefundRemainingAndUnknown:
         assert status == 422
         mock_refund.assert_not_called()
         payments.update.assert_not_called()
+
+
+@pytest.mark.reliability
+class TestLateWebhookOnExpiredRow:
+    """F2: a row locally set 'expired' (amount-mismatch release) can still
+    be paid through its old checkout URL before the remote PR is cancelled.
+    The customer paid a price they saw, so a late completed webhook must
+    finalize the row: re-arm 'expired' → 'pending' (guarded, no double
+    audit) and let confirm_payment complete it."""
+
+    def _payload_body(self, amount='149.00'):
+        return json.dumps({
+            'id': 'pr-expired',
+            'object': 'payment_request',
+            'status': 'completed',
+            'reference_number': 'ref-1',
+            'payments': [{
+                'id': 'pay-1',
+                'status': 'succeeded',
+                'amount': amount,
+                'payment_type': 'grabpay_direct',
+            }],
+        }).encode()
+
+    def _expired_row(self, **overrides):
+        row = {'id': 'p-1', 'provider_request_id': 'pr-expired',
+               'status': 'expired', 'amount': '149.00'}
+        row.update(overrides)
+        return row
+
+    def _expired_payments_table(self, row=None):
+        t = MagicMock()
+        t.select.return_value.eq.return_value.limit.return_value.execute\
+            .return_value = MagicMock(data=[row if row is not None
+                                            else self._expired_row()])
+        t.update.return_value.eq.return_value.execute.return_value = \
+            MagicMock(data=[])
+        t.insert.return_value.execute.return_value = MagicMock(data=[])
+        return t
+
+    def _sign(self, body: bytes) -> str:
+        return hmac.new(WEBHOOK_SALT.encode(), body,
+                        hashlib.sha256).hexdigest()
+
+    def _post(self, sb):
+        body = self._payload_body()
+        with patch('apps.payments.services.get_sb', return_value=sb):
+            return services.handle_webhook(
+                body, self._sign(body), 'payment_request.completed')
+
+    def test_expired_row_is_rearmed_and_confirmed(self):
+        payments = self._expired_payments_table()
+        sb = _mock_sb(payments=payments)
+        status, _ = self._post(sb)
+        assert status == 200
+        # Guarded re-arm: expired → pending, scoped to still-expired rows.
+        update_payloads = [c.args[0]
+                           for c in payments.update.call_args_list]
+        assert {'status': 'pending'} in update_payloads
+        eqs = ([c.args for c in payments.update.return_value.eq.call_args_list] +
+               [c.args for c in payments.update.return_value.eq.return_value.eq
+                .call_args_list])
+        assert ('status', 'expired') in eqs
+        assert ('provider_request_id', 'pr-expired') in eqs
+        # confirm_payment still runs — it owns the completion and the audit.
+        sb.rpc.assert_called_once()
+        assert sb.rpc.call_args.args[0] == 'confirm_payment'
+        assert sb.rpc.call_args.args[1]['p_provider_request_id'] == 'pr-expired'
+
+    def test_pending_row_is_not_double_rearmed(self):
+        """Only locally-expired rows get re-armed; a still-pending row goes
+        straight to confirm_payment with no extra update."""
+        payments = self._expired_payments_table(row=self._expired_row(
+            status='pending'))
+        sb = _mock_sb(payments=payments)
+        status, _ = self._post(sb)
+        assert status == 200
+        assert payments.update.call_args_list == []
+        assert sb.rpc.call_args.args[0] == 'confirm_payment'
+
+    def test_no_extra_audit_beyond_confirm_payment(self):
+        """The handler must not double-write audit: the RPC is the sole
+        audit writer for the confirm."""
+        payments = self._expired_payments_table()
+        audit_log = _table()
+        sb = _mock_sb(payments=payments, audit_log=audit_log)
+        self._post(sb)
+        assert audit_log.insert.call_args_list == []

@@ -16,7 +16,8 @@ from django.conf import settings
 from supabase import create_client
 
 from .hitpay import (HitPayError, create_payment_request, create_refund,
-                     get_payment_request, list_payment_requests)
+                     delete_payment_request, get_payment_request,
+                     list_payment_requests)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,32 @@ def _audit_amount_mismatch(sb, data: dict, succeeded: dict | None) -> None:
         )
 
 
+def _revive_expired_payment(sb, pr_id: str | None) -> bool:
+    """F2: a row set to 'expired' locally (amount-mismatch release: the
+    stale checkout was superseded by a fresh one at the new price) can
+    still be paid through its old checkout URL until the remote PR is
+    cancelled. The customer DID pay a price they saw, so a late completed
+    webhook must finalize, not silently drop. confirm_payment no-ops on
+    non-pending rows, so re-arm the expired row to 'pending' (guarded to
+    still-expired) and let confirm_payment complete it and write the
+    audit. Returns True when a revive actually happened."""
+    if not pr_id:
+        return False
+    existing = (sb.table('payments').select('id, status')
+                .eq('provider_request_id', pr_id).limit(1).execute())
+    rows = existing.data if isinstance(existing.data, list) else []
+    if not rows or rows[0].get('status') != 'expired':
+        return False
+    (sb.table('payments').update({'status': 'pending'})
+     .eq('provider_request_id', pr_id)
+     .eq('status', 'expired').execute())
+    logger.warning(
+        'late completed webhook for locally-expired payment (PR %s) — '
+        'customer paid the price they saw; re-armed row for '
+        'confirm_payment', pr_id)
+    return True
+
+
 def _handle_verified_event(sb, event_type: str, data: dict) -> None:
     """Act on a verified webhook payload (insert of the dedupe row is done)."""
     if event_type == 'payment_request.completed' and data.get('status') == 'completed':
@@ -99,6 +126,13 @@ def _handle_verified_event(sb, event_type: str, data: dict) -> None:
         except Exception:
             # Advisory check — a failure here must never block confirmation.
             logger.exception('payment_amount_mismatch check failed for %s',
+                             data.get('id'))
+        try:
+            _revive_expired_payment(sb, data.get('id'))
+        except Exception:
+            # Best-effort unblock — on failure confirm_payment simply
+            # no-ops on the still-expired row (status quo).
+            logger.exception('expired-payment revive failed for %s',
                              data.get('id'))
         sb.rpc('confirm_payment', {
             'p_provider_request_id': data.get('id'),
@@ -608,9 +642,12 @@ def create_payment(data: dict, _attempt: int = 0) -> tuple[int, dict]:
         # amount until the pending row ages out. On mismatch: release the
         # row ('expired' — a terminal status in 059's payments check, the
         # same convention reconcile uses) and re-claim fresh so a new PR
-        # is created at the new amount. HitPay offers no void endpoint in
-        # our client, so the superseded PR is left to expire unpaid
-        # (harmless).
+        # is created at the new amount. The superseded remote PR is then
+        # cancelled best-effort (delete_payment_request) so the old
+        # checkout URL cannot still be paid into an expired row; any
+        # remote cancellation error is non-fatal — a late completion is
+        # left to the webhook, which accepts it on an expired row (the
+        # customer paid a price they saw).
         existing = (sb.table('payments').select('*')
                     .eq('provider_request_id', provider_request_id)
                     .limit(1).execute())
@@ -636,6 +673,18 @@ def create_payment(data: dict, _attempt: int = 0) -> tuple[int, dict]:
             sb.table('payments').update({'status': 'expired'}) \
                 .eq('provider_request_id', provider_request_id) \
                 .eq('status', 'pending').execute()
+            # Local row is safely terminal — only now cancel the remote PR
+            # (best-effort). HitPay answers 4xx/409/404 for PRs it will not
+            # void (already completed etc.) and can time out; either way
+            # the flow MUST proceed to the fresh claim — the webhook owns
+            # the "someone paid anyway" case.
+            try:
+                delete_payment_request(provider_request_id)
+            except Exception:
+                logger.warning(
+                    'could not cancel superseded HitPay PR %s after '
+                    'amount-mismatch release (left to the webhook)',
+                    provider_request_id, exc_info=True)
             if _attempt >= 1:
                 return 409, {'error': 'Could not reserve a payment slot; '
                                       'try again'}
