@@ -186,7 +186,15 @@ class TestGenerateCertThemePassThrough:
         uploaded = sb.storage.from_.return_value.upload.call_args.kwargs['file']
         assert Image.open(io.BytesIO(uploaded)).size == (800, 600)
 
-    def test_themed_upload_still_certificates_bucket_signed_url(self):
+    def test_themed_upload_still_certificates_bucket_signed_url(self, monkeypatch):
+        # Themed rendering now consumes URLs: stub the SSRF fetcher so this
+        # contract test remains network-free (asset errors -> omissible).
+        from apps.ecert.assets import ThemeAssetError
+
+        def fail(url, *, max_bytes, **kwargs):
+            raise ThemeAssetError(f'stubbed failure: {url}')
+
+        monkeypatch.setattr('apps.ecert.services.fetch_theme_asset', fail)
         sb = _make_sb()
         with patch('apps.ecert.services.get_supabase_client', return_value=sb):
             url = generate_cert(
