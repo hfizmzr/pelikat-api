@@ -15,7 +15,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image, ImageChops, ImageDraw, ImageStat
 
-from apps.ecert.services import generate_cert, normalize_theme, plate_for
+import apps.ecert.assets as assets_module
+import apps.ecert.services as services_module
+from apps.ecert.services import (
+    _ellipsize,
+    _font,
+    generate_cert,
+    normalize_theme,
+    plate_for,
+)
 
 WARNING_LEVEL = logging.WARNING
 BG_URL = 'https://test.supabase.co/storage/v1/object/public/event-themes/bg.png'
@@ -61,7 +69,7 @@ def _install_fetch(monkeypatch, *, bg=DEFAULT_BG_PNG, logo=DEFAULT_LOGO_PNG,
     """Route fake in-memory PNGs by url suffix; `error` raises for EVERY url."""
     calls = []
 
-    def fake_fetch(url, *, max_bytes):
+    def fake_fetch(url, *, max_bytes, deadline=None):
         calls.append((url, max_bytes))
         if error is not None:
             raise error
@@ -156,7 +164,7 @@ class TestLegacyUnperturbed:
     """theme omitted / None => byte-identical legacy 800x600 path, zero fetches."""
 
     def test_no_theme_is_legacy_800x600(self, monkeypatch):
-        def explode(url, *, max_bytes, **kwargs):
+        def explode(url, *, max_bytes, deadline=None):
             raise AssertionError('legacy path must never fetch theme assets')
 
         monkeypatch.setattr('apps.ecert.services.fetch_theme_asset', explode)
@@ -247,7 +255,7 @@ class TestOptionalAssets:
     def test_logo_badge_fetch_error_omitted(self, monkeypatch, caplog):
         from apps.ecert.assets import ThemeAssetError
 
-        def flaky(url, *, max_bytes, **kwargs):
+        def flaky(url, *, max_bytes, deadline=None):
             if url == BG_URL:
                 return _png(CANVAS)
             raise ThemeAssetError(f'fetch failed: {url}')
@@ -363,3 +371,94 @@ class TestLayoutContract:
         bbox = ImageChops.difference(band, ref).getbbox()
         assert bbox is not None
         assert (bbox[2] - bbox[0]) <= int(CANVAS[0] * 0.6)
+
+
+class _CountingDraw:
+    """ImageDraw proxy counting textlength calls (pins linearity by count)."""
+
+    def __init__(self, draw):
+        self._draw = draw
+        self.textlength_calls = 0
+
+    def textlength(self, text, font=None):
+        self.textlength_calls += 1
+        return self._draw.textlength(text, font=font)
+
+
+class TestEllipsizeLinear:
+    """PR12 review: _ellipsize must be linear, not shrink-by-one O(n²)."""
+
+    NAME_FONT = _font('DejaVuSans-Bold.ttf', 220)
+    MAX_W = 2000
+
+    def _counting_draw(self):
+        return _CountingDraw(ImageDraw.Draw(Image.new('RGB', (16, 16))))
+
+    def test_fits_unchanged_single_measure(self):
+        counting = self._counting_draw()
+        assert _ellipsize(counting, 'Alice Tan', self.NAME_FONT, self.MAX_W) == 'Alice Tan'
+        assert counting.textlength_calls == 1
+
+    def test_10k_char_input_returns_fitting_result_bounded_measures(self):
+        counting = self._counting_draw()
+        out = _ellipsize(counting, 'Zul ' * 2500, self.NAME_FONT, self.MAX_W)
+        assert out.endswith('…')
+        assert counting._draw.textlength(out, font=self.NAME_FONT) <= self.MAX_W
+        # Old shrink-by-one loop needed ~10k remeasures here; the linear
+        # version is one measure + proportional cut + residual trim only.
+        assert counting.textlength_calls <= 10
+
+    def test_5000_char_bib_input_returns_quickly(self):
+        counting = self._counting_draw()
+        out = _ellipsize(counting, '9' * 5000, self.NAME_FONT, self.MAX_W)
+        assert out.endswith('…')
+        assert counting._draw.textlength(out, font=self.NAME_FONT) <= self.MAX_W
+        assert counting.textlength_calls <= 10
+
+
+class TestSharedRenderDeadline:
+    """PR12 review: one shared deadline bounds the whole themed render."""
+
+    def test_expired_deadline_short_circuits_later_fetches(self, monkeypatch, caplog):
+        clock = {'now': 0.0}
+        monkeypatch.setattr('time.monotonic', lambda: clock['now'])
+        asset_calls = []
+
+        class DeadlineBlowingResponse:
+            def __init__(self, payload):
+                self.status_code = 200
+                self.headers = {'Content-Length': str(len(payload))}
+                self._payload = payload
+
+            def __enter__(self):
+                # Answering the first fetch burns the entire render budget.
+                clock['now'] += services_module._RENDER_DEADLINE_SECONDS + 1
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def iter_bytes(self):
+                yield self._payload
+
+        def factory(method, url, **kwargs):
+            asset_calls.append(url)
+            return DeadlineBlowingResponse(_png((1600, 1200)))
+
+        def fake_fetch(url, *, max_bytes, deadline=None):
+            return assets_module.fetch_theme_asset(
+                url, max_bytes=max_bytes, deadline=deadline,
+                stream_factory=factory,
+            )
+
+        monkeypatch.setattr('apps.ecert.services.fetch_theme_asset', fake_fetch)
+        with caplog.at_level(WARNING_LEVEL, logger='ecert'):
+            img = _render(_themed())
+        # Only the FIRST (background) fetch opened a stream; the logo/badge
+        # fetches short-circuited on the shared deadline before any network.
+        assert len(asset_calls) == 1
+        # Per-asset fallback still lives: theme-coloured canvas, cert returns.
+        assert img.size == CANVAS
+        assert img.getpixel((5, 500)) == (255, 255, 255)
+        deadline_warnings = [m for m in caplog.messages if 'deadline' in m]
+        assert len(deadline_warnings) >= 3  # background + logo + badge

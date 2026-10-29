@@ -8,6 +8,7 @@ import io
 import logging
 import os
 import re
+import time
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from supabase import create_client
@@ -212,6 +213,7 @@ _SMALL_PLATE_PAD = (16, 8)   # heading/bib/row padding
 _ASSET_MAX_H = 400          # keeps thumbnails above the heading plate
 _MAX_ASSET_PIXELS = 35_000_000   # ~4x the certificate canvas
 _MAX_ASSET_DIM = 12_000
+_RENDER_DEADLINE_SECONDS = 90.0  # gunicorn --timeout 120 leaves render slack
 
 # Per-field fill-sample regions (each text field is inked against the art it
 # lands on, not against the name-plate strip — cr review, T3).
@@ -324,7 +326,7 @@ def _fallback_canvas(colors):
     return img
 
 
-def _themed_background(theme):
+def _themed_background(theme, deadline=None):
     """(canvas, fill_lux) — validated background art, or theme-coloured fallback.
 
     Never raises: any fetch/validation/decode failure logs a warning and uses
@@ -333,7 +335,7 @@ def _themed_background(theme):
     url = theme.get('certificate_background_url')
     if url:
         try:
-            raw = fetch_theme_asset(url, max_bytes=MAX_BG_BYTES)
+            raw = fetch_theme_asset(url, max_bytes=MAX_BG_BYTES, deadline=deadline)
             fitted = ImageOps.fit(
                 _decode_background(raw), _CANVAS_SIZE, Image.Resampling.LANCZOS
             )
@@ -356,13 +358,32 @@ def _font(name, size):
 
 
 def _ellipsize(draw, text, font, max_width):
-    """Truncate `text` with an ellipsis so it fits `max_width` pixels."""
+    """Truncate `text` with an ellipsis so it fits `max_width` pixels.
+
+    Linear by construction (PR12 review): one full-width measure, a single
+    proportional cut against the mean glyph advance, then one final
+    re-measure that trims only any residual kerning excess — replacing the
+    shrink-by-one-remeasure loop that was O(n²) on hostile input. Ellipsis
+    semantics unchanged: unchanged when it already fits, else a `…`-suffixed
+    prefix that fits `max_width`.
+    """
     text = str(text)
-    if draw.textlength(text, font=font) <= max_width:
+    full = draw.textlength(text, font=font)
+    if full <= max_width:
         return text
-    while text and draw.textlength(text + '…', font=font) > max_width:
-        text = text[:-1]
-    return f'{text}…'
+    ell = draw.textlength('…', font=font)
+    budget = max_width - ell
+    if budget <= 0:
+        return '…'
+    mean = full / len(text)
+    cut = f'{text[:int(budget / mean)]}…'
+    width = draw.textlength(cut, font=font)  # single final re-measure
+    while width > max_width and len(cut) > 1:
+        # Residual non-uniform glyph widths: trim proportionally to the
+        # measured excess instead of one char per pass.
+        cut = cut[max(1, int((width - max_width) / mean)):]
+        width = draw.textlength(cut, font=font)
+    return cut
 
 
 def _draw_text_plate(img, draw, text, font, fill_lux, *, center=None, pos=None, pad=_PLATE_PAD):
@@ -385,9 +406,9 @@ def _draw_text_plate(img, draw, text, font, fill_lux, *, center=None, pos=None, 
     img.paste(plate, pos, plate)
 
 
-def _paste_asset(img, url, *, max_frac, x, y, right_edge=False):
+def _paste_asset(img, url, *, max_frac, x, y, right_edge=False, deadline=None):
     """Fetch + composite one thumbnail with a thin keyline at `max_frac` width."""
-    raw = fetch_theme_asset(url, max_bytes=MAX_SMALL_ASSET_BYTES)
+    raw = fetch_theme_asset(url, max_bytes=MAX_SMALL_ASSET_BYTES, deadline=deadline)
     icon = Image.open(io.BytesIO(raw))
     _apply_pixel_ceiling(icon, 'thumbnail')
     icon = icon.convert('RGBA')
@@ -424,16 +445,18 @@ def _meta_rows(labels, meta):
     return rows
 
 
-def _render_themed(theme, meta):
+def _render_themed(theme, meta, deadline=None):
     """A4-landscape (3508x2480) themed render (spec §7).
 
     Background validation / remote-asset failures degrade per asset; only
-    unexpected programming errors propagate to `_render_safe`.
+    unexpected programming errors propagate to `_render_safe`. `deadline`
+    (optional `time.monotonic()` instant) is the render's shared budget: each
+    asset fetch stops at min(its own 60s, remaining).
     """
     labels = theme.get('labels') or {}
     layout = theme.get('layout') or {}
 
-    img, fill_lux = _themed_background(theme)
+    img, fill_lux = _themed_background(theme, deadline)
     draw = ImageDraw.Draw(img)
     fonts = {
         'heading': _font('DejaVuSans-Bold.ttf', 150),
@@ -487,7 +510,7 @@ def _render_themed(theme, meta):
             continue
         try:
             _paste_asset(img, url, max_frac=max_frac, x=x, y=_SAFE_MARGIN * 2,
-                         right_edge=right_edge)
+                         right_edge=right_edge, deadline=deadline)
         except Exception as exc:  # noqa: BLE001 — optional asset: omit, never fail
             _log.warning('theme %s omitted (%s: %s)', key, type(exc).__name__, exc)
 
@@ -496,8 +519,12 @@ def _render_themed(theme, meta):
 
 def _render_safe(theme, meta):
     """Never-fail themed render (spec §7): warn + legacy fallback, bubble nothing."""
+    # One shared deadline for the whole render (PR12 review): sequential
+    # per-asset 60s budgets could otherwise stack to ~180s and outlive the
+    # gunicorn worker timeout; each fetch stops at min(60s, remaining).
+    deadline = time.monotonic() + _RENDER_DEADLINE_SECONDS
     try:
-        return _render_themed(theme, meta)
+        return _render_themed(theme, meta, deadline=deadline)
     except Exception as exc:  # noqa: BLE001 — never-fail contract
         _log.warning(
             'themed render failed (%s: %s), legacy fallback', type(exc).__name__, exc

@@ -82,7 +82,10 @@ def validate_allowed_asset_url(url: object) -> str:
     return _validate(url)
 
 
-def fetch_theme_asset(url: str, *, max_bytes: int, stream_factory=httpx.stream) -> bytes:
+def fetch_theme_asset(
+    url: str, *, max_bytes: int, deadline: float | None = None,
+    stream_factory=httpx.stream
+) -> bytes:
     """Fetch a validated theme asset subject to `max_bytes`, or raise.
 
     Streams the GET with `timeout=httpx.Timeout(10.0, read=20.0)` and
@@ -91,12 +94,26 @@ def fetch_theme_asset(url: str, *, max_bytes: int, stream_factory=httpx.stream) 
     connection error or timeout aborts the stream and raises ThemeAssetError
     (which also covers the validation path). No content-type check: the
     storage bucket already enforces asset types.
+
+    `deadline` (PR12 review): optional absolute `time.monotonic()` deadline
+    shared by the whole certificate render. The fetch stops at
+    min(its own 60s budget, remaining time), so several sequential assets can
+    never stretch the request past the caller's overall limit.
     """
     _validate(url)
     # Overall deadline starts before the blocking header wait; each blocking
     # operation is still bounded by httpx connect/read timeouts, so the worst
     # case is deadline + one read timeout, never an unbounded hang.
-    deadline = time.monotonic() + _TOTAL_DEADLINE_SECONDS
+    now = time.monotonic()
+    if deadline is not None:
+        remaining = deadline - now
+        if remaining <= 0:
+            raise ThemeAssetError(
+                'theme asset fetch failed: total deadline exceeded'
+            )
+        deadline = now + min(_TOTAL_DEADLINE_SECONDS, remaining)
+    else:
+        deadline = now + _TOTAL_DEADLINE_SECONDS
     try:
         with stream_factory(
             'GET', url, timeout=_STREAM_TIMEOUT, follow_redirects=False

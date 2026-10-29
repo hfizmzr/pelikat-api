@@ -197,7 +197,7 @@ class TestGenerateCertThemePassThrough:
         # contract test remains network-free (asset errors -> omissible).
         from apps.ecert.assets import ThemeAssetError
 
-        def fail(url, *, max_bytes, **kwargs):
+        def fail(url, *, max_bytes, deadline=None):
             raise ThemeAssetError(f'stubbed failure: {url}')
 
         monkeypatch.setattr('apps.ecert.services.fetch_theme_asset', fail)
@@ -224,6 +224,64 @@ class TestGenerateCertThemePassThrough:
             for bad in (42, 'red', [], True):
                 url = generate_cert('Alice', 'Marathon', 'A001', '2025-01-01', 'reg-1', theme=bad)
                 assert url == 'https://test.url/cert.png'
+
+
+class TestGenerateCertViewTextCaps:
+    """PR12 review: render inputs are truncated (not rejected) at the view."""
+
+    def _post(self, api_client, internal_api_key, **overrides):
+        payload = dict(BASE_PAYLOAD)
+        payload.update(overrides)
+        return api_client.post(
+            ECERT_URL,
+            data=json.dumps(payload),
+            content_type='application/json',
+            **internal_api_key
+        )
+
+    def test_overlong_fields_truncated_with_warning(
+        self, api_client, internal_api_key, caplog
+    ):
+        gen = MagicMock(return_value='https://test.url/cert.png')
+        with patch('apps.ecert.views.generate_cert', gen), \
+                caplog.at_level(WARNING_CAPLOG, logger='ecert'):
+            response = self._post(
+                api_client, internal_api_key,
+                runner_name='N' * 300, event_name='E' * 300, bib_number='B' * 40,
+            )
+        assert response.status_code == 200
+        kwargs = gen.call_args.kwargs
+        assert kwargs['runner_name'] == 'N' * 256
+        assert kwargs['event_name'] == 'E' * 256
+        assert kwargs['bib_number'] == 'B' * 32
+        assert sum('truncated' in m for m in caplog.messages) == 3
+
+    def test_within_caps_pass_unchanged(self, api_client, internal_api_key):
+        gen = MagicMock(return_value='https://test.url/cert.png')
+        with patch('apps.ecert.views.generate_cert', gen):
+            response = self._post(api_client, internal_api_key)
+        assert response.status_code == 200
+        kwargs = gen.call_args.kwargs
+        assert kwargs['runner_name'] == 'Test Runner'
+        assert kwargs['event_name'] == 'Test Event'
+        assert kwargs['bib_number'] == 'A001'
+
+    def test_overlong_input_through_real_renderer_still_200(
+        self, api_client, internal_api_key, monkeypatch
+    ):
+        from apps.ecert.assets import ThemeAssetError
+
+        def fail(url, *, max_bytes, deadline=None):
+            raise ThemeAssetError(f'stubbed failure: {url}')
+
+        monkeypatch.setattr('apps.ecert.services.fetch_theme_asset', fail)
+        with patch('apps.ecert.services.get_supabase_client', return_value=_make_sb()):
+            response = self._post(
+                api_client, internal_api_key,
+                runner_name='N' * 100_000, bib_number='B' * 5_000,
+            )
+        assert response.status_code == 200
+        assert 'cert_url' in response.json()
 
 
 class TestGenerateCertViewTheme:

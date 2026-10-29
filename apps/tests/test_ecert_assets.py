@@ -319,3 +319,52 @@ def test_fetch_total_deadline_aborts_trickling_stream(monkeypatch):
 
     with pytest.raises(ThemeAssetError, match='deadline'):
         fetch_theme_asset(PREFIX + 'a.png', max_bytes=10, stream_factory=factory)
+
+
+def test_fetch_shared_deadline_bounds_sequential_fetches(monkeypatch):
+    # PR12 review: sequential fetches must share the render's overall
+    # deadline: min(own 60s budget, remaining). Tiny budget => later calls
+    # raise before any stream is opened.
+    clock = {'now': 0.0}
+    monkeypatch.setattr(assets_module.time, 'monotonic', lambda: clock['now'])
+
+    first = fake_stream([b'ab'])
+    assert fetch_theme_asset(
+        PREFIX + 'a.png', max_bytes=10,
+        deadline=clock['now'] + 5.0, stream_factory=first,
+    ) == b'ab'  # tiny remaining budget, own 60s cap is not the binding one
+
+    expired = clock['now'] + 5.0
+    clock['now'] += 10.0  # deadline now in the past
+    never = fake_stream([b'x'])
+
+    for _ in range(2):  # later fetches: fast short-circuit, zero network
+        with pytest.raises(ThemeAssetError, match='deadline'):
+            fetch_theme_asset(
+                PREFIX + 'a.png', max_bytes=10, deadline=expired,
+                stream_factory=never,
+            )
+    assert never.calls == []  # short-circuited before any stream opened
+    assert len(first.calls) == 1  # only the one in-budget fetch hit the wire
+
+
+def test_fetch_shared_deadline_caps_own_budget(monkeypatch):
+    # remaining < the fetch's own 60s budget => remaining is the binding one:
+    # a trickling stream must abort at the shared deadline, not at 60s.
+    clock = {'now': 100.0}
+    monkeypatch.setattr(assets_module.time, 'monotonic', lambda: clock['now'])
+
+    def factory(method, url, **kwargs):
+        class SlowResponse(FakeResponse):
+            def iter_bytes(self):
+                yield b'a'
+                clock['now'] += 60.0  # past the 5s shared budget, own 60s ok
+                yield b'b'
+
+        return SlowResponse(200, [])
+
+    with pytest.raises(ThemeAssetError, match='deadline'):
+        fetch_theme_asset(
+            PREFIX + 'a.png', max_bytes=10, deadline=clock['now'] + 5.0,
+            stream_factory=factory,
+        )

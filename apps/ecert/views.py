@@ -2,10 +2,28 @@
 E-Certificate Views
 """
 
+import logging
+
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .services import generate_cert
+
+_log = logging.getLogger('ecert')
+
+# Render-input caps (PR12 review): _ellipsize is linear but the draw cost of
+# unbounded strings is not, and a bib is a prefix + number. Truncate (the API
+# has always returned 200 for any string) and warn at the 'ecert' logger.
+_TEXT_CAPS = {'runner_name': 256, 'event_name': 256, 'bib_number': 32}
+
+
+def _cap_field(name, value):
+    """Truncate an over-long string field to its cap, warning when it bites."""
+    cap = _TEXT_CAPS[name]
+    if isinstance(value, str) and len(value) > cap:
+        _log.warning('%s truncated to %d chars (over-long input)', name, cap)
+        return value[:cap]
+    return value
 
 
 @api_view(['POST'])
@@ -45,6 +63,10 @@ def generate_cert_view(request):
 
     if not all([runner_name, event_name, bib_number, event_date, registration_id]):
         return Response({'error': 'Missing required fields'}, status=400)
+
+    runner_name = _cap_field('runner_name', runner_name)
+    event_name = _cap_field('event_name', event_name)
+    bib_number = _cap_field('bib_number', bib_number)
 
     try:
         cert_url = generate_cert(
