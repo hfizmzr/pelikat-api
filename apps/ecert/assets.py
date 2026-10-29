@@ -12,8 +12,10 @@ from urllib.parse import unquote, urlparse
 import httpx
 from django.conf import settings
 
-# Spec stream caps: background <= 10 MB, logo/badge <= 1 MB.
-MAX_BG_BYTES = 10_485_760
+# Spec stream caps (spec §6/§13): certificate_background <= 8 MB,
+# logo/badge <= 1 MB. (The storage bucket's 10 MB cap is a pelikat-web
+# concern and is deliberately not mirrored here.)
+MAX_BG_BYTES = 8_388_608
 MAX_SMALL_ASSET_BYTES = 1_048_576
 
 _STREAM_TIMEOUT = httpx.Timeout(10.0, read=20.0)
@@ -52,7 +54,15 @@ def _validate(url: object) -> str:
 
     lowered = url.lower()
     decoded = unquote(url)
-    if '..' in url or '..' in decoded or '%2e%2e' in lowered or '%2f..' in lowered:
+    # Belt (fail-closed): a second decode pass so `%252e%252e` (which one
+    # decode turns into literal `%2e%2e`) cannot slip past. Trade-off: a
+    # legit key containing a literal `%2e` in its filename after one decode
+    # is rejected too — acceptable, allowlist is decoration-only.
+    decoded_twice = unquote(decoded)
+    if (
+        '..' in url or '..' in decoded or '..' in decoded_twice
+        or '%2e%2e' in lowered or '%2f..' in lowered
+    ):
         raise ThemeAssetError('theme asset url rejected: traversal sequence')
 
     if url == prefix:
@@ -74,7 +84,8 @@ def validate_allowed_asset_url(url: object) -> str:
       `SUPABASE_URL + "/storage/v1/object/public/event-themes/"` prefix
       (no other host, no other bucket);
     - no `..` raw or percent-encoded (`%2e%2e`, `%2f..`, case-insensitive),
-      and the percent-decoded form must not contain `..`;
+      and the percent-decoded form — including a second decode pass so
+      `%252e%252e` is caught — must not contain `..`;
     - no userinfo (`@` in netloc), no bare bucket base, no query/fragment.
 
     An empty/unset SUPABASE_URL fails closed: every url is rejected.

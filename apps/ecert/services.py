@@ -74,7 +74,12 @@ def _clean_section(value, key, section_keys, clean_value):
             continue
         if key == 'layout' and sk == 'name_plate':
             if sv != 'auto':
-                _log.warning('theme layout: ignored name_plate %r (kept auto)', sv)
+                # Log the key only: the value is user-controlled payload and
+                # must never reach the log line.
+                _log.warning(
+                    'theme layout: name_plate ignored '
+                    '(layout key sent non-auto value; kept auto)'
+                )
             continue
         cleaned_value = clean_value(key, sk, sv)
         if cleaned_value is None:
