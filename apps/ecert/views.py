@@ -21,7 +21,8 @@ def generate_cert_view(request):
         "runner_name": "John Doe",
         "event_name": "KL Marathon 2025",
         "bib_number": "A001",
-        "event_date": "2025-03-15"
+        "event_date": "2025-03-15",
+        "theme": {"colors": {...}, "labels": {...}, ...}
     }
 
     Response:
@@ -35,6 +36,13 @@ def generate_cert_view(request):
     event_date = data.get('event_date')
     registration_id = data.get('registration_id')
 
+    theme = data.get('theme')
+    if theme is not None and not isinstance(theme, dict):
+        return Response(
+            {'detail': "theme must be an object (dict) or null"},
+            status=400
+        )
+
     if not all([runner_name, event_name, bib_number, event_date, registration_id]):
         return Response({'error': 'Missing required fields'}, status=400)
 
@@ -44,7 +52,8 @@ def generate_cert_view(request):
             event_name=event_name,
             bib_number=bib_number,
             event_date=event_date,
-            registration_id=registration_id
+            registration_id=registration_id,
+            theme=theme
         )
         return Response({'cert_url': cert_url})
     except Exception as e:
