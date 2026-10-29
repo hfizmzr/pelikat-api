@@ -145,6 +145,18 @@ class TestNormalizeTheme:
         assert out == {'layout': {'name_plate': 'auto', 'logo_url': 'https://x/logo.png'}}
         assert any('name_plate' in m for m in caplog.messages)
 
+    def test_name_plate_warning_logs_key_never_payload_value(self, caplog):
+        """Payload-safety pin: the non-auto warning must not embed the
+        user-controlled value ('left' here) in its formatted text."""
+        theme = {'layout': {'name_plate': 'left'}}
+        with caplog.at_level(WARNING_CAPLOG, logger='ecert'):
+            out = normalize_theme(theme)
+        assert out is None  # nothing left after dropping name_plate
+        assert len(caplog.records) >= 1
+        assert 'name_plate' in caplog.text
+        assert 'left' not in caplog.text
+        assert 'non-auto value' in caplog.text
+
     def test_empty_string_values_treated_as_absent(self):
         theme = {
             'colors': {'primary': ''},

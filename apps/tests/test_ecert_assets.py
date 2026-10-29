@@ -112,6 +112,14 @@ def test_encoded_dot_dot_rejects():
         validate_allowed_asset_url(url)
 
 
+def test_double_encoded_dot_dot_rejects():
+    """Belt: one decode turns %252e%252e into literal '%2e%2e'; only the
+    second decode reveals the traversal, so it must be rejected too."""
+    url = PREFIX + '%252e%252e/certs/reg.png'
+    with pytest.raises(ThemeAssetError):
+        validate_allowed_asset_url(url)
+
+
 def test_encoded_slash_dot_dot_rejects():
     url = PREFIX + 'a%2F..%2F/private'
     with pytest.raises(ThemeAssetError):
@@ -225,8 +233,22 @@ def test_fetch_cap_exact_boundary_passes():
 
 
 def test_fetch_background_cap_constants():
-    assert MAX_BG_BYTES == 10_485_760
+    assert MAX_BG_BYTES == 8 * 1024 * 1024  # spec §6/§13: background <= 8 MB
     assert MAX_SMALL_ASSET_BYTES == 1_048_576
+
+
+def test_fetch_bg_declared_length_8mb_boundary(monkeypatch):
+    """Spec §6/§13 boundary: declared content-length exactly 8388608 passes,
+    8388609 is rejected before any byte is read."""
+    stream_eq = fake_stream([b'\x00' * 8_388_608],
+                            headers=FakeHeaders({'Content-Length': 8388608}))
+    assert fetch_theme_asset(PREFIX + 'bg.png', max_bytes=MAX_BG_BYTES,
+                             stream_factory=stream_eq) == b'\x00' * 8_388_608
+    over = fake_stream([], status=200,
+                       headers=FakeHeaders({'Content-Length': 8388609}))
+    with pytest.raises(ThemeAssetError, match='exceeds .* byte cap'):
+        fetch_theme_asset(PREFIX + 'bg.png', max_bytes=MAX_BG_BYTES,
+                          stream_factory=over)
 
 
 def test_fetch_redirect_attempt_treated_as_error():
