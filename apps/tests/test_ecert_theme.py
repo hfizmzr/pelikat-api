@@ -128,9 +128,15 @@ class TestNormalizeTheme:
         assert out is None
         assert any('64' in m for m in caplog.messages)
 
-    def test_label_suffix_aliases_accepted(self):
+    def test_label_suffix_aliases_unknown_key_dropped_warned(self, caplog):
+        """Regression pin: long-key aliases dropped loudly now that web ships short keys."""
         theme = {'labels': {'bib_label': 'Crew ID', 'certificate_label': 'Sijil'}}
-        assert normalize_theme(theme) == {'labels': {'bib': 'Crew ID', 'certificate': 'Sijil'}}
+        with caplog.at_level(WARNING_CAPLOG, logger='ecert'):
+            out = normalize_theme(theme)
+        assert out is None
+        assert len(caplog.records) == 2
+        assert any('bib_label' in m for m in caplog.messages)
+        assert any('certificate_label' in m for m in caplog.messages)
 
     def test_name_plate_non_auto_ignored_keeps_auto(self, caplog):
         theme = {'layout': {'name_plate': 'left', 'logo_url': 'https://x/logo.png'}}

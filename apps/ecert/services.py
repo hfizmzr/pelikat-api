@@ -26,14 +26,6 @@ _HEX_RE = re.compile(r'^#[0-9a-fA-F]{6}$')
 
 _COLOR_KEYS = ('primary', 'secondary', 'accent', 'background', 'foreground')
 _LABEL_KEYS = ('bib', 'checkpoint', 'medal', 'run', 'participant', 'certificate')
-_LABEL_ALIASES = {
-    'bib_label': 'bib',
-    'checkpoint_label': 'checkpoint',
-    'medal_label': 'medal',
-    'run_label': 'run',
-    'participant_label': 'participant',
-    'certificate_label': 'certificate',
-}
 _LAYOUT_KEYS = ('logo_url', 'badge_icon_url', 'name_plate')
 
 
@@ -76,23 +68,20 @@ def _clean_section(value, key, section_keys, clean_value):
         return None
     cleaned = {}
     for sk, sv in value.items():
-        canonical = _LABEL_ALIASES.get(sk) if key == 'labels' else None
-        if canonical is None and sk in section_keys:
-            canonical = sk
-        if canonical is None:
+        if sk not in section_keys:
             _log.warning('theme %s: dropped unknown key %r', key, sk)
             continue
         if key == 'layout' and sk == 'name_plate':
             if sv != 'auto':
                 _log.warning('theme layout: ignored name_plate %r (kept auto)', sv)
             continue
-        cleaned_value = clean_value(key, canonical, sv)
+        cleaned_value = clean_value(key, sk, sv)
         if cleaned_value is None:
             continue
         if key == 'labels' and len(cleaned_value) > 64:
-            _log.warning('theme labels: dropped %r (over 64 chars)', canonical)
+            _log.warning('theme labels: dropped %r (over 64 chars)', sk)
             continue
-        cleaned[canonical] = cleaned_value
+        cleaned[sk] = cleaned_value
     if key == 'layout' and cleaned:
         cleaned['name_plate'] = 'auto'
     return cleaned or None
