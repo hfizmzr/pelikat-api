@@ -95,8 +95,7 @@ def build_photo_tag_rows(result: dict, event_id: str, organizer_id: str, batch_i
     detections_by_bib = {}
     for detection in result.get('detections', []):
         bib_number = detection.get('bib_number')
-        # Below the review threshold is noise; skipping it also keeps
-        # discarded+bib rows exclusive to organizer rejections.
+        # Below the review threshold is noise (FR-19 flags 0.50 and up).
         if not bib_number or detection.get('status') == 'discarded':
             continue
 
@@ -137,31 +136,28 @@ def build_photo_tag_rows(result: dict, event_id: str, organizer_id: str, batch_i
     }]
 
 
-def is_organizer_decision(tag: dict) -> bool:
+def replace_ai_tags(sb, event_id: str, storage_path: str, rows: list[dict]) -> list[dict]:
     """
-    True for rows a reprocess must keep: organizer-confirmed tags, and
-    rejected reads (discarded with a bib). The AI only ever writes
-    'discarded' for the bib-less "nothing found" placeholder.
+    Swap the photo's AI-owned tags for `rows` in one transaction
+    (replace_ai_photo_tags, migration 088). Organizer decisions are kept:
+    confirmed tags, and discarded reads an organizer rejected (reviewed_at
+    set); new reads for those bibs are skipped. Returns every row the photo
+    now has, each flagged `inserted`.
     """
-    status = tag.get('status')
-    return status == 'confirmed' or (status == 'discarded' and tag.get('bib_number') is not None)
-
-
-def merge_with_kept_tags(rows: list[dict], kept: list[dict]) -> list[dict]:
-    """Drop new rows that would duplicate or contradict a kept organizer decision."""
-    if not kept:
-        return rows
-
-    kept_bibs = {tag['bib_number'] for tag in kept if tag.get('bib_number')}
-    return [row for row in rows if row.get('bib_number') and row['bib_number'] not in kept_bibs]
+    res = sb.rpc('replace_ai_photo_tags', {
+        'p_event_id': event_id,
+        'p_storage_path': storage_path,
+        'p_rows': rows,
+    }).execute()
+    return res.data or []
 
 
 def process_photo(storage_path: str, event_id: str, organizer_id: str, batch_id: str):
     """
     Download a photo, read bib candidates, and persist rows to photo_tags.
 
-    Reprocessing replaces only AI-owned rows (auto / review / bib-less
-    placeholder); confirmed and rejected tags survive.
+    Reprocessing replaces only AI-owned rows; confirmed and rejected tags
+    survive (see replace_ai_tags).
     """
     sb = get_supabase_client()
     result = read_storage_photo(storage_path)
@@ -169,23 +165,8 @@ def process_photo(storage_path: str, event_id: str, organizer_id: str, batch_id:
         return result
 
     try:
-        # Build rows before deleting anything so a lookup failure leaves the old tags intact.
         rows = build_photo_tag_rows(result, event_id, organizer_id, batch_id, sb)
-        existing = (
-            sb.table('photo_tags')
-            .select('id, bib_number, status')
-            .eq('event_id', event_id)
-            .eq('storage_path', storage_path)
-            .execute()
-        ).data or []
-        kept = [tag for tag in existing if is_organizer_decision(tag)]
-        replaceable_ids = [tag['id'] for tag in existing if not is_organizer_decision(tag)]
-        rows = merge_with_kept_tags(rows, kept)
-
-        if replaceable_ids:
-            sb.table('photo_tags').delete().in_('id', replaceable_ids).execute()
-        if rows:
-            sb.table('photo_tags').insert(rows).execute()
+        saved = replace_ai_tags(sb, event_id, storage_path, rows)
     except Exception as e:  # noqa: BLE001 — per-photo graceful degrade; error dict keeps the batch alive
         return {'storage_path': storage_path, 'error': str(e)}
 
@@ -194,7 +175,7 @@ def process_photo(storage_path: str, event_id: str, organizer_id: str, batch_id:
             'event_id': event_id,
             'organizer_id': organizer_id,
             'batch_id': batch_id,
-            'saved_tags': len(rows),
+            'saved_tags': sum(1 for tag in saved if tag.get('inserted')),
         }
     )
     return result

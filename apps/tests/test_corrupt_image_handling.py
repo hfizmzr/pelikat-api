@@ -82,6 +82,7 @@ class TestCorruptImageHandling:
                 # Should NOT delete/insert into photo_tags
                 mock_sb.table.return_value.delete.assert_not_called()
                 mock_sb.table.return_value.insert.assert_not_called()
+                mock_sb.rpc.assert_not_called()
 
     def test_batch_processing_continues_past_corrupt(self):
         """process_storage_paths continues processing even if one image is corrupt."""
