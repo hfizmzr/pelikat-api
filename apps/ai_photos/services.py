@@ -38,7 +38,7 @@ def read_storage_photo(
         result['bucket'] = bucket
         return result
 
-    except Exception:  # noqa: BLE001 — per-photo graceful degrade; error dict keeps the batch alive
+    except Exception as e:  # noqa: BLE001 — per-photo graceful degrade; error dict keeps the batch alive
         return {'storage_path': storage_path, 'error': str(e)}
 
 
