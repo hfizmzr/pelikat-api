@@ -2,16 +2,40 @@
 AI Photo Processing Views
 """
 
+import uuid
+
+from postgrest.exceptions import APIError
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .reader import read_bibs_from_bytes
 from .services import (
+    enqueue_batch,
+    enqueue_prefix,
     get_batch_status,
-    process_storage_paths,
-    process_storage_prefix,
     read_storage_photo,
 )
+
+BATCH_ID_FIELDS = ('batch_id', 'event_id', 'organizer_id')
+
+
+def is_uuid(value) -> bool:
+    try:
+        uuid.UUID(str(value))
+    except ValueError:
+        return False
+    return True
+
+
+def missing_batch_ids(data) -> list[str]:
+    return [field for field in BATCH_ID_FIELDS if not is_uuid(data.get(field))]
+
+
+def enqueue_error_response(exc: Exception) -> Response:
+    # enqueue_photo_batch raises 22023 for an empty path list.
+    if isinstance(exc, APIError) and exc.code == '22023':
+        return Response({'error': exc.message}, status=400)
+    raise exc
 
 
 def get_bib_options(data):
@@ -94,26 +118,41 @@ def process_photos(request):
     """
     POST /ai/photos/process
 
+    Queues the photos for the background worker (manage.py run_photo_worker)
+    and returns immediately.
+
     Request body:
     {
         "batch_id": "uuid",
         "event_id": "uuid",
         "organizer_id": "uuid",
-        "storage_paths": ["race-photos/event123/img001.jpg", ...]
+        "created_by": "uuid (optional)",
+        "storage_paths": ["user_id/event_id/batch_id/img001.jpg", ...]
     }
 
-    Response:
-    { "batch_id": "uuid", "processed": 12, "saved_tags": 18, "results": [...] }
+    Response (202): the photo_batches row
+    { "id": "uuid", "status": "queued", "total": 12, "processed": 0, ... }
     """
     data = request.data
-    batch_id = data.get('batch_id')
-    event_id = data.get('event_id')
-    organizer_id = data.get('organizer_id')
-    paths = data.get('storage_paths', [])
+    missing = missing_batch_ids(data)
+    if missing:
+        return Response({'error': f"{', '.join(missing)} must be UUIDs"}, status=400)
 
-    result = process_storage_paths(paths, event_id, organizer_id, batch_id)
+    paths = data.get('storage_paths') or []
+    if not isinstance(paths, list) or not paths or not all(isinstance(path, str) for path in paths):
+        return Response({'error': 'storage_paths must be a non-empty list of paths'}, status=400)
 
-    return Response(result)
+    try:
+        batch = enqueue_batch(
+            batch_id=data['batch_id'],
+            event_id=data['event_id'],
+            organizer_id=data['organizer_id'],
+            storage_paths=paths,
+            created_by=data.get('created_by') if is_uuid(data.get('created_by')) else None,
+        )
+    except APIError as exc:
+        return enqueue_error_response(exc)
+    return Response(batch, status=202)
 
 
 @api_view(['POST'])
@@ -121,36 +160,44 @@ def process_photo_prefix(request):
     """
     POST /ai/photos/process-prefix
 
+    Lists every image under the storage prefix and queues them as one
+    reprocess batch. Returns immediately.
+
     Request body:
     {
         "batch_id": "uuid",
         "event_id": "uuid",
         "organizer_id": "uuid",
+        "created_by": "uuid (optional)",
         "bucket": "race-photos",
         "prefix": "user_id/event_id"
     }
 
-    Response:
-    { "batch_id": "uuid", "processed": 12, "saved_tags": 18, "results": [...] }
+    Response (202): the photo_batches row
     """
     data = request.data
-    batch_id = data.get('batch_id')
-    event_id = data.get('event_id')
-    organizer_id = data.get('organizer_id')
-    bucket = data.get('bucket') or 'race-photos'
-    prefix = data.get('prefix')
+    missing = missing_batch_ids(data)
+    if missing:
+        return Response({'error': f"{', '.join(missing)} must be UUIDs"}, status=400)
 
+    prefix = data.get('prefix')
     if not prefix:
         return Response({'error': 'prefix is required'}, status=400)
 
-    result = process_storage_prefix(
-        bucket=bucket,
-        prefix=prefix,
-        event_id=event_id,
-        organizer_id=organizer_id,
-        batch_id=batch_id,
-    )
-    return Response(result)
+    try:
+        batch = enqueue_prefix(
+            batch_id=data['batch_id'],
+            event_id=data['event_id'],
+            organizer_id=data['organizer_id'],
+            bucket=data.get('bucket') or 'race-photos',
+            prefix=prefix,
+            created_by=data.get('created_by') if is_uuid(data.get('created_by')) else None,
+        )
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=400)
+    except APIError as exc:
+        return enqueue_error_response(exc)
+    return Response(batch, status=202)
 
 
 @api_view(['GET'])
@@ -158,8 +205,14 @@ def photo_status(request, batch_id):
     """
     GET /ai/photos/status/{batch_id}
 
-    Response:
-    { "batch_id": "uuid", "counts": {...} }
+    Response: the photo_batches row
+    { "id": "uuid", "status": "processing", "total": 12, "processed": 5,
+      "auto_tagged": 3, "flagged": 1, "no_bib": 0, "failed": 1, ... }
     """
-    result = get_batch_status(batch_id)
-    return Response(result)
+    if not is_uuid(batch_id):
+        return Response({'error': 'batch_id must be a UUID'}, status=400)
+
+    batch = get_batch_status(batch_id)
+    if batch is None:
+        return Response({'error': 'Batch not found'}, status=404)
+    return Response(batch)

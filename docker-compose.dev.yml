@@ -30,6 +30,26 @@ services:
     networks:
       - pelikat-shared
 
+  # AI photo pipeline (FR-16): drains the photo_batch_items queue.
+  # Restart it after changing apps/ai_photos — it has no autoreload.
+  photo-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment:
+      - DEBUG=True
+      - SECRET_KEY=dev-secret-key-do-not-use-in-production
+      # show progress lines live in `docker logs` (stdout is block-buffered otherwise)
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    command: python manage.py run_photo_worker
+    restart: unless-stopped
+    networks:
+      - pelikat-shared
+
 networks:
   pelikat-shared:
     external: true

@@ -88,6 +88,24 @@ def get_ocr_reader():
     return _ocr_reader
 
 
+def warm_up_models():
+    """
+    Load both models and run each once on a blank image. The first real
+    inference otherwise pays PyTorch / Paddle start-up (~4-5 s on CPU), which
+    the first photo of a batch would feel.
+    """
+    options = get_reader_options()
+    blank = np.zeros((options.yolo_imgsz, options.yolo_imgsz, 3), dtype=np.uint8)
+    get_yolo_model().predict(
+        source=blank,
+        conf=options.yolo_conf,
+        imgsz=options.yolo_imgsz,
+        save=False,
+        verbose=False,
+    )
+    get_ocr_reader().ocr(preprocess_for_ocr(blank[:64, :160], options.upscale_factor))
+
+
 def clamp(value: int, low: int, high: int) -> int:
     return max(low, min(value, high))
 

@@ -13,8 +13,8 @@ from apps.ai_photos.reader import (
     read_bibs_from_bytes,
 )
 from apps.ai_photos.services import (
+    drain_queue,
     process_photo,
-    process_storage_paths,
     read_storage_photo,
 )
 
@@ -85,29 +85,30 @@ class TestCorruptImageHandling:
                 mock_sb.rpc.assert_not_called()
 
     def test_batch_processing_continues_past_corrupt(self):
-        """process_storage_paths continues processing even if one image is corrupt."""
-        with patch('apps.ai_photos.services.get_supabase_client') as mock_get_sb:
-            mock_sb = MagicMock()
-            mock_get_sb.return_value = mock_sb
-            
-            with patch('apps.ai_photos.services.process_photo') as mock_process:
-                # First image is corrupt, second is valid
-                mock_process.side_effect = [
-                    {'error': 'Corrupt image', 'storage_path': 'bad.jpg'},
-                    {'saved_tags': 2, 'storage_path': 'good.jpg'},
-                ]
-                
-                result = process_storage_paths(
-                    ['bad.jpg', 'good.jpg'],
-                    'event-123', 'org-123', 'batch-456'
-                )
-                
-                assert result['processed'] == 2
-                assert len(result['results']) == 2
-                # First result is error
-                assert 'error' in result['results'][0]
-                # Second result is success
-                assert result['results'][1]['saved_tags'] == 2
+        """The worker keeps draining the queue when one image is corrupt, and records it as failed."""
+        items = [
+            {'id': 'item-bad', 'storage_path': 'bad.jpg', 'event_id': 'event-123',
+             'organizer_id': 'org-123', 'batch_id': 'batch-456'},
+            {'id': 'item-good', 'storage_path': 'good.jpg', 'event_id': 'event-123',
+             'organizer_id': 'org-123', 'batch_id': 'batch-456'},
+        ]
+        with patch('apps.ai_photos.services.get_supabase_client'), \
+             patch('apps.ai_photos.services.load_bib_index'), \
+             patch('apps.ai_photos.services.claim_queue_items', side_effect=[items[:1], items[1:], []]), \
+             patch('apps.ai_photos.services.finish_queue_item') as mock_finish, \
+             patch('apps.ai_photos.services.process_photo') as mock_process:
+            mock_process.side_effect = [
+                {'error': 'Corrupt image', 'storage_path': 'bad.jpg'},
+                {'saved_tags': 2, 'storage_path': 'good.jpg', 'outcome': 'auto_tagged'},
+            ]
+
+            handled = drain_queue()
+
+        assert handled == 2
+        assert mock_finish.call_args_list[0].args == ('item-bad', None)
+        assert mock_finish.call_args_list[0].kwargs['error'] == 'Corrupt image'
+        assert mock_finish.call_args_list[1].args == ('item-good', 'auto_tagged')
+        assert mock_finish.call_args_list[1].kwargs['tag_count'] == 2
 
     def test_graceful_zero_detections(self):
         """Images with no bib detections are handled gracefully (discarded status)."""

@@ -10,3 +10,17 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+
+  # AI photo pipeline (FR-16): drains the photo_batch_items queue. Keep it
+  # at one replica — see apps/ai_photos/management/commands/run_photo_worker.py.
+  photo-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    command: python manage.py run_photo_worker
+    environment:
+      # show progress lines live in `docker logs` (stdout is block-buffered otherwise)
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    restart: unless-stopped
