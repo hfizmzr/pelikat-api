@@ -18,6 +18,9 @@ services:
       context: .
       dockerfile: Dockerfile.prod
     command: python manage.py run_photo_worker
+    # SIGTERM lets the worker finish its current photo; Docker's default is
+    # to SIGKILL after 10s, which could cut a slow photo off mid-write.
+    stop_grace_period: 2m
     environment:
       # show progress lines live in `docker logs` (stdout is block-buffered otherwise)
       - PYTHONUNBUFFERED=1

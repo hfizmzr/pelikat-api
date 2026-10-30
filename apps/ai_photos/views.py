@@ -10,6 +10,8 @@ from rest_framework.response import Response
 
 from .reader import read_bibs_from_bytes
 from .services import (
+    RACE_PHOTOS_BUCKET,
+    NoPhotosFound,
     enqueue_batch,
     enqueue_prefix,
     get_batch_status,
@@ -32,9 +34,10 @@ def missing_batch_ids(data) -> list[str]:
 
 
 def enqueue_error_response(exc: Exception) -> Response:
-    # enqueue_photo_batch raises 22023 for an empty path list.
+    # enqueue_photo_batch raises 22023 for an empty path list. Fixed text:
+    # never echo database / library messages to the caller.
     if isinstance(exc, APIError) and exc.code == '22023':
-        return Response({'error': exc.message}, status=400)
+        return Response({'error': 'No photos to process.'}, status=400)
     raise exc
 
 
@@ -183,18 +186,26 @@ def process_photo_prefix(request):
     prefix = data.get('prefix')
     if not prefix:
         return Response({'error': 'prefix is required'}, status=400)
+    if not isinstance(prefix, str):
+        return Response({'error': 'prefix must be a string'}, status=400)
+
+    # The worker only reads from race-photos, so a batch listed from any
+    # other bucket would be processed against the wrong objects.
+    bucket = data.get('bucket') or RACE_PHOTOS_BUCKET
+    if bucket != RACE_PHOTOS_BUCKET:
+        return Response({'error': f'Only the {RACE_PHOTOS_BUCKET} bucket can be processed'}, status=400)
 
     try:
         batch = enqueue_prefix(
             batch_id=data['batch_id'],
             event_id=data['event_id'],
             organizer_id=data['organizer_id'],
-            bucket=data.get('bucket') or 'race-photos',
+            bucket=bucket,
             prefix=prefix,
             created_by=data.get('created_by') if is_uuid(data.get('created_by')) else None,
         )
-    except ValueError as exc:
-        return Response({'error': str(exc)}, status=400)
+    except NoPhotosFound:
+        return Response({'error': 'No photos found in that upload folder.'}, status=400)
     except APIError as exc:
         return enqueue_error_response(exc)
     return Response(batch, status=202)

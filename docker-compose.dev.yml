@@ -46,6 +46,9 @@ services:
     volumes:
       - .:/app
     command: python manage.py run_photo_worker
+    # SIGTERM lets the worker finish its current photo; Docker's default is
+    # to SIGKILL after 10s, which could cut a slow photo off mid-write.
+    stop_grace_period: 2m
     restart: unless-stopped
     networks:
       - pelikat-shared

@@ -154,7 +154,7 @@ def test_drain_queue_reuses_one_client_and_one_bib_index_per_event():
     ]
     sb = MagicMock()
     with patch('apps.ai_photos.services.get_supabase_client', return_value=sb) as get_sb, \
-         patch('apps.ai_photos.services.load_bib_index', return_value='index') as load, \
+         patch('apps.ai_photos.services.load_bib_index') as load, \
          patch('apps.ai_photos.services.claim_queue_items', side_effect=[items, []]), \
          patch('apps.ai_photos.services.finish_queue_item') as finish, \
          patch('apps.ai_photos.services.process_photo',
@@ -162,9 +162,13 @@ def test_drain_queue_reuses_one_client_and_one_bib_index_per_event():
         assert services.drain_queue() == 3
 
     get_sb.assert_called_once()
-    load.assert_called_once_with(sb, EVENT)
-    assert all(call.kwargs == {'sb': sb, 'bib_index': 'index'} for call in process.call_args_list)
+    assert all(call.kwargs['sb'] is sb for call in process.call_args_list)
     assert all(call.kwargs['sb'] is sb for call in finish.call_args_list)
+    # one per-event view onto the same shared cache
+    lookups = [call.kwargs['bib_index'] for call in process.call_args_list]
+    assert all(isinstance(lookup, services.EventBibs) and lookup.event_id == EVENT for lookup in lookups)
+    assert len({id(lookup.cache) for lookup in lookups}) == 1
+    load.assert_not_called()  # nothing looked a bib up in this test
 
 
 def test_bib_index_matches_exact_then_case_insensitive():
@@ -271,3 +275,85 @@ def test_build_rows_sends_each_bib_once():
     assert sorted(bibs) == ['1951', 'M90038']
     # the stronger read wins
     assert next(row for row in rows if row['bib_number'] == 'M90038')['confidence'] == 0.95
+
+
+# ── CodeRabbit round 1 on #16 ─────────────────────────────────
+
+def test_process_prefix_rejects_other_buckets():
+    with patch('apps.ai_photos.services.list_storage_image_paths') as listing:
+        res = post(views.process_photo_prefix, {
+            'batch_id': BATCH, 'event_id': EVENT, 'organizer_id': ORG, 'prefix': 'u/e', 'bucket': 'ic-documents',
+        })
+
+    assert res.status_code == 400
+    listing.assert_not_called()
+
+
+def test_process_prefix_rejects_non_string_prefix():
+    with patch('apps.ai_photos.services.list_storage_image_paths') as listing:
+        res = post(views.process_photo_prefix, {
+            'batch_id': BATCH, 'event_id': EVENT, 'organizer_id': ORG, 'prefix': ['u/e'],
+        })
+
+    assert res.status_code == 400
+    assert res.data == {'error': 'prefix must be a string'}
+    listing.assert_not_called()
+
+
+def test_process_prefix_never_echoes_unexpected_error_text():
+    with patch('apps.ai_photos.services.list_storage_image_paths', side_effect=ValueError('internal detail /srv/x')):
+        res = post(views.process_photo_prefix, {
+            'batch_id': BATCH, 'event_id': EVENT, 'organizer_id': ORG, 'prefix': 'u/e',
+        })
+
+    assert res.status_code == 500
+    assert 'internal detail' not in str(res.data)
+
+
+def test_bib_cache_reloads_on_miss_at_most_every_30s():
+    now = [0.0]
+    before = services.BibIndex([])
+    after = services.BibIndex([{'id': 'reg-new', 'runner_id': 'runner-new', 'bib_number': 'M90038'}])
+    with patch('apps.ai_photos.services.load_bib_index', side_effect=[before, after]) as load:
+        cache = services.BibIndexCache(MagicMock(), clock=lambda: now[0])
+        assert cache.find(EVENT, 'M90038') is None      # first load, just loaded: no reload
+        now[0] = 10
+        assert cache.find(EVENT, 'M90038') is None      # still within 30s of the load
+        now[0] = 31
+        assert cache.find(EVENT, 'M90038')['id'] == 'reg-new'   # reloaded once, now matched
+    assert load.call_count == 2
+
+
+def test_bib_cache_hit_never_reloads():
+    index = services.BibIndex([{'id': 'reg-1', 'runner_id': 'r1', 'bib_number': '101'}])
+    now = [0.0]
+    with patch('apps.ai_photos.services.load_bib_index', return_value=index) as load:
+        cache = services.BibIndexCache(MagicMock(), clock=lambda: now[0])
+        for t in (0, 60, 120):
+            now[0] = t
+            assert cache.find(EVENT, '101')['id'] == 'reg-1'
+    load.assert_called_once()
+
+
+def test_bib_cache_drops_expired_events():
+    now = [0.0]
+    with patch('apps.ai_photos.services.load_bib_index', return_value=services.BibIndex([])):
+        cache = services.BibIndexCache(MagicMock(), ttl_seconds=300, clock=lambda: now[0])
+        cache.get('event-a')
+        now[0] = 301
+        cache.get('event-b')
+
+    assert set(cache.entries) == {'event-b'}
+
+
+def test_list_storage_image_paths_walks_subfolders():
+    storage = MagicMock()
+    storage.list.side_effect = [[{'name': 'a.jpg'}, {'name': 'sub'}], [{'name': 'b.png'}]]
+    sb = MagicMock()
+    sb.storage.from_.return_value = storage
+
+    with patch('apps.ai_photos.services.get_supabase_client', return_value=sb):
+        paths = services.list_storage_image_paths('race-photos', 'u/e/b')
+
+    assert paths == ['u/e/b/a.jpg', 'u/e/b/sub/b.png']
+    assert storage.list.call_args_list[1].args[0] == 'u/e/b/sub'

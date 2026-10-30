@@ -49,7 +49,8 @@ docker-compose up --build
 Both compose files start two services: `api` (gunicorn / runserver) and
 `photo-worker` (`python manage.py run_photo_worker`), which processes queued
 photo batches in the background. Run exactly one `photo-worker`. It needs
-migration `087_photo_batches_queue` (pelikat-web) applied.
+migrations `087_photo_batches_queue` and `088_photo_tags_review_provenance`
+(pelikat-web) applied.
 
 ## Tests
 

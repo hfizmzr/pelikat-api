@@ -17,18 +17,27 @@ from .reader import read_bibs_from_bytes
 
 logger = logging.getLogger(__name__)
 
+# The only bucket the queue reads from (process_photo -> read_storage_photo).
+RACE_PHOTOS_BUCKET = 'race-photos'
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp')
 STORAGE_LIST_PAGE_SIZE = 1000
 REGISTRATION_PAGE_SIZE = 1000
-# How long the worker trusts an event's bib list before reloading it, so a
-# BIB assigned mid-batch is picked up within a few minutes.
+# How long the worker trusts an event's bib list before reloading it.
 BIB_INDEX_TTL_SECONDS = 300
+# A bib not in the cached list triggers a reload at most this often, so a
+# BIB assigned mid-batch is matched within seconds without a query per
+# unmatched read (spectator / banner numbers miss all the time).
+BIB_MISS_RELOAD_SECONDS = 30
+
+
+class NoPhotosFound(Exception):
+    """A reprocess prefix contained no images."""
 
 
 def read_storage_photo(
     storage_path: str,
     *,
-    bucket: str = 'race-photos',
+    bucket: str = RACE_PHOTOS_BUCKET,
     bib_regex: str | None = None,
     bib_format: str | None = None,
     sb=None,
@@ -154,20 +163,62 @@ def load_bib_index(sb, event_id: str) -> BibIndex:
 
 
 class BibIndexCache:
-    """Per-event BibIndex for the worker, reloaded after BIB_INDEX_TTL_SECONDS."""
+    """
+    Per-event BibIndex for the worker. Entries expire after ttl_seconds; a
+    lookup miss reloads the event's list if it is older than
+    miss_reload_seconds. Expired entries are dropped on every get, so a long
+    drain over many events doesn't keep them all.
+    """
 
-    def __init__(self, sb, ttl_seconds: float = BIB_INDEX_TTL_SECONDS, clock=time.monotonic):
+    def __init__(
+        self,
+        sb,
+        ttl_seconds: float = BIB_INDEX_TTL_SECONDS,
+        miss_reload_seconds: float = BIB_MISS_RELOAD_SECONDS,
+        clock=time.monotonic,
+    ):
         self.sb = sb
         self.ttl_seconds = ttl_seconds
+        self.miss_reload_seconds = miss_reload_seconds
         self.clock = clock
         self.entries: dict[str, tuple[float, BibIndex]] = {}
 
+    def load(self, event_id: str) -> BibIndex:
+        index = load_bib_index(self.sb, event_id)
+        self.entries[event_id] = (self.clock(), index)
+        return index
+
     def get(self, event_id: str) -> BibIndex:
+        now = self.clock()
+        for key in [key for key, (loaded_at, _) in self.entries.items() if now - loaded_at > self.ttl_seconds]:
+            del self.entries[key]
+
         entry = self.entries.get(event_id)
-        if entry is None or self.clock() - entry[0] > self.ttl_seconds:
-            entry = (self.clock(), load_bib_index(self.sb, event_id))
-            self.entries[event_id] = entry
-        return entry[1]
+        return entry[1] if entry else self.load(event_id)
+
+    def find(self, event_id: str, bib_number: str) -> dict | None:
+        registration = self.get(event_id).find(bib_number)
+        if registration or not bib_number:
+            return registration
+
+        loaded_at, _ = self.entries[event_id]
+        if self.clock() - loaded_at < self.miss_reload_seconds:
+            return None
+        return self.load(event_id).find(bib_number)
+
+    def for_event(self, event_id: str) -> 'EventBibs':
+        return EventBibs(self, event_id)
+
+
+class EventBibs:
+    """BibIndex-shaped view of one event in a BibIndexCache (refreshes on a miss)."""
+
+    def __init__(self, cache: BibIndexCache, event_id: str):
+        self.cache = cache
+        self.event_id = event_id
+
+    def find(self, bib_number: str) -> dict | None:
+        return self.cache.find(self.event_id, bib_number)
 
 
 def build_photo_tag_rows(
@@ -176,7 +227,7 @@ def build_photo_tag_rows(
     organizer_id: str,
     batch_id: str,
     sb,
-    bib_index: BibIndex | None = None,
+    bib_index: BibIndex | EventBibs | None = None,
 ) -> list[dict]:
     detections_by_bib = {}
     for detection in result.get('detections', []):
@@ -257,7 +308,7 @@ def process_photo(
     batch_id: str,
     *,
     sb=None,
-    bib_index: BibIndex | None = None,
+    bib_index: BibIndex | EventBibs | None = None,
 ):
     """
     Download a photo, read bib candidates, and persist rows to photo_tags.
@@ -326,7 +377,7 @@ def enqueue_prefix(
 ) -> dict:
     storage_paths = list_storage_image_paths(bucket, prefix)
     if not storage_paths:
-        raise ValueError('No photos found in that upload folder.')
+        raise NoPhotosFound(prefix)
 
     return enqueue_batch(
         batch_id=batch_id,
@@ -365,7 +416,7 @@ def run_queue_item(item: dict, *, sb=None, bib_indexes: BibIndexCache | None = N
     """Process one claimed photo and record its outcome on the batch."""
     sb = sb or get_supabase_client()
     try:
-        bib_index = bib_indexes.get(item['event_id']) if bib_indexes else None
+        bib_index = bib_indexes.for_event(item['event_id']) if bib_indexes else None
         result = process_photo(
             item['storage_path'], item['event_id'], item['organizer_id'], item['batch_id'],
             sb=sb, bib_index=bib_index,
