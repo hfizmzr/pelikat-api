@@ -94,7 +94,6 @@ def parse_td3(text: str) -> dict | None:
             birth_date = _resolve_date(birth, expiring=False, errors=errors)
             expiry_date = _resolve_date(expiry, expiring=True, errors=errors)
 
-            _ = birth_date, expiry_date  # surfaced in the return dict below
             return {
                 "passport_number": doc_num,
                 "date_of_birth": birth_date,

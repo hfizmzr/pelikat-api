@@ -6,8 +6,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .reader import read_bibs_from_bytes
-from .services import read_storage_photo
-from .services import process_storage_paths, process_storage_prefix
+from .services import read_storage_photo, process_storage_paths, process_storage_prefix, get_batch_status
 
 
 def get_bib_options(data):
@@ -47,7 +46,7 @@ def read_uploaded_photos(request):
                 source_name=image_file.name,
                 **options,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — single unreadable file must not kill a batch upload
             result = {'source_name': image_file.name, 'error': str(exc)}
         results.append(result)
 
@@ -157,6 +156,5 @@ def photo_status(request, batch_id):
     Response:
     { "batch_id": "uuid", "counts": {...} }
     """
-    from .services import get_batch_status
     result = get_batch_status(batch_id)
     return Response(result)

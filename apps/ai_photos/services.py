@@ -4,23 +4,11 @@ AI Photo Processing Service
 Uses YOLO for bib detection and PaddleOCR for OCR on cropped regions.
 """
 
-from supabase import create_client
-from django.conf import settings
+from pelikat.supabase import get_sb as get_supabase_client
 
 from .reader import read_bibs_from_bytes
 
-supabase_client = None
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp')
-
-
-def get_supabase_client():
-    global supabase_client
-    if supabase_client is None:
-        supabase_client = create_client(
-            settings.SUPABASE_URL,
-            settings.SUPABASE_SERVICE_ROLE_KEY
-        )
-    return supabase_client
 
 
 def read_storage_photo(
@@ -50,7 +38,7 @@ def read_storage_photo(
         result['bucket'] = bucket
         return result
 
-    except Exception as e:
+    except Exception:  # noqa: BLE001 — per-photo graceful degrade; error dict keeps the batch alive
         return {'storage_path': storage_path, 'error': str(e)}
 
 
@@ -103,8 +91,7 @@ def find_registration_for_bib(sb, event_id: str, bib_number: str) -> dict | None
     return res.data[0] if res.data else None
 
 
-def build_photo_tag_rows(result: dict, event_id: str, organizer_id: str, batch_id: str) -> list[dict]:
-    sb = get_supabase_client()
+def build_photo_tag_rows(result: dict, event_id: str, organizer_id: str, batch_id: str, sb) -> list[dict]:
     detections_by_bib = {}
     for detection in result.get('detections', []):
         bib_number = detection.get('bib_number')
@@ -158,7 +145,7 @@ def process_photo(storage_path: str, event_id: str, organizer_id: str, batch_id:
         return result
 
     sb.table('photo_tags').delete().eq('event_id', event_id).eq('storage_path', storage_path).execute()
-    rows = build_photo_tag_rows(result, event_id, organizer_id, batch_id)
+    rows = build_photo_tag_rows(result, event_id, organizer_id, batch_id, sb)
     sb.table('photo_tags').insert(rows).execute()
 
     result.update(

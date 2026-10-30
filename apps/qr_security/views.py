@@ -4,16 +4,12 @@ QR Security Views
 
 from datetime import datetime, timedelta, timezone
 
-from django.conf import settings
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from supabase import create_client
+
+from pelikat.supabase import get_sb as _supabase
 
 from .services import sign_qr, verify_qr, generate_consent_code
-
-
-def _supabase():
-    return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
 
 
 @api_view(['POST'])

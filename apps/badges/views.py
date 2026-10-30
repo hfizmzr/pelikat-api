@@ -2,9 +2,14 @@
 Badge Views
 """
 
+import logging
+
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
+
 from .services import evaluate_badges, get_badge_definitions
+
+logger = logging.getLogger(__name__)
 
 
 @api_view(["POST"])
@@ -24,8 +29,9 @@ def evaluate_badges_view(request):
     try:
         result = evaluate_badges(runner_id, event_id or None)
         return Response(result)
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
+    except Exception:  # noqa: BLE001 — 500 guard: detail logged server-side, generic body to client
+        logger.exception("badge evaluation failed for runner %s", runner_id)
+        return Response({"error": "internal error"}, status=500)
 
 
 @api_view(["GET"])

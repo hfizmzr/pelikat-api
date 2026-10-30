@@ -11,8 +11,8 @@ import re
 import time
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-from supabase import create_client
-from django.conf import settings
+
+from pelikat.supabase import get_sb as get_supabase_client
 
 from apps.ecert.assets import (
     MAX_BG_BYTES,
@@ -28,13 +28,6 @@ _HEX_RE = re.compile(r'^#[0-9a-fA-F]{6}$')
 _COLOR_KEYS = ('primary', 'secondary', 'accent', 'background', 'foreground')
 _LABEL_KEYS = ('bib', 'checkpoint', 'medal', 'run', 'participant', 'certificate')
 _LAYOUT_KEYS = ('logo_url', 'badge_icon_url', 'name_plate')
-
-
-def get_supabase_client():
-    return create_client(
-        settings.SUPABASE_URL,
-        settings.SUPABASE_SERVICE_ROLE_KEY
-    )
 
 
 def _clean_str(section, key, value) -> str | None:
@@ -556,7 +549,7 @@ def _render_legacy(runner_name, event_name, bib_number, event_date):
         small_font = ImageFont.truetype(
             '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 40
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 — legacy font fallback keeps render alive
         font = ImageFont.load_default()
         small_font = font
 
