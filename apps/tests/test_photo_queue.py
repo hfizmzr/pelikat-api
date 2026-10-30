@@ -251,3 +251,23 @@ def test_process_photo_outcome_comes_from_replace_result(saved, outcome, saved_t
 
     assert result['outcome'] == outcome
     assert result['saved_tags'] == saved_tags
+
+
+def test_build_rows_sends_each_bib_once():
+    # replace_ai_photo_tags (migration 088) only checks bibs against rows that
+    # existed before its insert, so a bib sent twice would hit the
+    # (event_id, storage_path, bib_number) unique index and fail the photo.
+    result = {
+        'storage_path': 'u/e/b/a.jpg',
+        'detections': [
+            {'bib_number': 'M90038', 'ocr_confidence': 0.70, 'status': 'review'},
+            {'bib_number': 'M90038', 'ocr_confidence': 0.95, 'status': 'auto'},
+            {'bib_number': '1951', 'ocr_confidence': 0.60, 'status': 'review'},
+        ],
+    }
+    rows = services.build_photo_tag_rows(result, EVENT, ORG, BATCH, MagicMock(), services.BibIndex([]))
+
+    bibs = [row['bib_number'] for row in rows]
+    assert sorted(bibs) == ['1951', 'M90038']
+    # the stronger read wins
+    assert next(row for row in rows if row['bib_number'] == 'M90038')['confidence'] == 0.95
