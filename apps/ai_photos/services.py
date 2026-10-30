@@ -95,7 +95,9 @@ def build_photo_tag_rows(result: dict, event_id: str, organizer_id: str, batch_i
     detections_by_bib = {}
     for detection in result.get('detections', []):
         bib_number = detection.get('bib_number')
-        if not bib_number:
+        # Below the review threshold is noise; skipping it also keeps
+        # discarded+bib rows exclusive to organizer rejections.
+        if not bib_number or detection.get('status') == 'discarded':
             continue
 
         existing = detections_by_bib.get(bib_number)
@@ -135,18 +137,57 @@ def build_photo_tag_rows(result: dict, event_id: str, organizer_id: str, batch_i
     }]
 
 
+def is_organizer_decision(tag: dict) -> bool:
+    """
+    True for rows a reprocess must keep: organizer-confirmed tags, and
+    rejected reads (discarded with a bib). The AI only ever writes
+    'discarded' for the bib-less "nothing found" placeholder.
+    """
+    status = tag.get('status')
+    return status == 'confirmed' or (status == 'discarded' and tag.get('bib_number') is not None)
+
+
+def merge_with_kept_tags(rows: list[dict], kept: list[dict]) -> list[dict]:
+    """Drop new rows that would duplicate or contradict a kept organizer decision."""
+    if not kept:
+        return rows
+
+    kept_bibs = {tag['bib_number'] for tag in kept if tag.get('bib_number')}
+    return [row for row in rows if row.get('bib_number') and row['bib_number'] not in kept_bibs]
+
+
 def process_photo(storage_path: str, event_id: str, organizer_id: str, batch_id: str):
     """
     Download a photo, read bib candidates, and persist rows to photo_tags.
+
+    Reprocessing replaces only AI-owned rows (auto / review / bib-less
+    placeholder); confirmed and rejected tags survive.
     """
     sb = get_supabase_client()
     result = read_storage_photo(storage_path)
     if result.get('error'):
         return result
 
-    sb.table('photo_tags').delete().eq('event_id', event_id).eq('storage_path', storage_path).execute()
-    rows = build_photo_tag_rows(result, event_id, organizer_id, batch_id, sb)
-    sb.table('photo_tags').insert(rows).execute()
+    try:
+        # Build rows before deleting anything so a lookup failure leaves the old tags intact.
+        rows = build_photo_tag_rows(result, event_id, organizer_id, batch_id, sb)
+        existing = (
+            sb.table('photo_tags')
+            .select('id, bib_number, status')
+            .eq('event_id', event_id)
+            .eq('storage_path', storage_path)
+            .execute()
+        ).data or []
+        kept = [tag for tag in existing if is_organizer_decision(tag)]
+        replaceable_ids = [tag['id'] for tag in existing if not is_organizer_decision(tag)]
+        rows = merge_with_kept_tags(rows, kept)
+
+        if replaceable_ids:
+            sb.table('photo_tags').delete().in_('id', replaceable_ids).execute()
+        if rows:
+            sb.table('photo_tags').insert(rows).execute()
+    except Exception as e:  # noqa: BLE001 — per-photo graceful degrade; error dict keeps the batch alive
+        return {'storage_path': storage_path, 'error': str(e)}
 
     result.update(
         {
