@@ -30,7 +30,7 @@ def evaluate_badges_view(request):
         result = evaluate_badges(runner_id, event_id or None)
         return Response(result)
     except Exception:
-        logger.exception("badge evaluation failed for runner %s", runner_id)
+        logger.exception("badge evaluation failed for runner %r", runner_id)
         return Response({"error": "internal error"}, status=500)
 
 

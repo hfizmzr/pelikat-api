@@ -950,15 +950,19 @@ class TestPaymentStatus:
 
 @pytest.mark.reliability
 class TestRefund:
-    def _completed_payment(self, rail):
-        return _table([{
+    @classmethod
+    def _completed_rows(cls, rail):
+        return {
             'provider_request_id': 'pr-9',
             'provider_payment_id': 'pay-1',
             'payment_rail': rail,
             'status': 'completed',
             'amount': '10.00',
             'registration_id': 'reg-1',
-        }])
+        }
+
+    def _completed_payment(self, rail):
+        return _table([self._completed_rows(rail)])
 
     def test_refund_blocks_nonrefundable_rails(self, api_client):
         """duitnow refunds must be refused server-side and flagged."""
@@ -1026,12 +1030,17 @@ class TestRefund:
         mock_refund.assert_not_called()
 
     def test_refund_rejects_invalid_amounts(self, api_client):
-        """M3: client amount must be numeric, > 0, ≤ stored amount."""
-        self._completed_payment('fpx')
+        """M3: client amount must be numeric, > 0, ≤ stored amount.
+        '-1'/'0'/'abc' die at pre-validation; '99.00' is valid input that
+        dies at the post-claim remaining-bound check — so the claim must
+        succeed here (real payment rows, never a bare MagicMock)."""
+        rows = self._completed_rows('fpx')
         for bad_amount in ('-1', '0', 'abc', '99.00'):
+            payments = _table([rows])
+            payments.update.return_value.eq.return_value.in_.return_value \
+                .is_.return_value.execute.return_value = MagicMock(data=[{'id': 1}])
             with patch('apps.payments.services.get_sb',
-                       return_value=_mock_sb(payments=_table(
-                           self._completed_payment('fpx')))), \
+                       return_value=_mock_sb(payments=payments)), \
                  patch('apps.payments.services.create_refund') as mock_refund:
                 response = api_client.post(
                     '/payments/refund',
@@ -1039,6 +1048,12 @@ class TestRefund:
                     content_type='application/json', **_auth(),
                 )
             assert response.status_code == 422, bad_amount
+            assert response.json()['error'].startswith('Refund amount'), bad_amount
+            if bad_amount == '99.00':
+                # Above the remaining amount → survived pre-validation,
+                # claimed the slot, and was refused by the remaining check.
+                assert 'remaining' in response.json()['error'], bad_amount
+                assert payments.update.call_count >= 2, bad_amount  # claim + release
             mock_refund.assert_not_called()
 
     def test_refund_hitpay_failure_releases_claim_502(self):
