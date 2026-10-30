@@ -175,17 +175,14 @@ def generate_cert(
 
 def _render_cert(runner_name, event_name, bib_number, event_date, theme=None):
     """Dispatch rendering: themed (never fails) or the verbatim legacy seam."""
-    meta = {
-        'runner_name': runner_name,
-        'event_name': event_name,
-        'bib_number': bib_number,
-        'event_date': event_date,
-    }
     if theme:
-        return _render_safe(theme, meta)
-    return _render_legacy(
-        meta['runner_name'], meta['event_name'], meta['bib_number'], meta['event_date']
-    )
+        return _render_safe(theme, {
+            'runner_name': runner_name,
+            'event_name': event_name,
+            'bib_number': bib_number,
+            'event_date': event_date,
+        })
+    return _render_legacy(runner_name, event_name, bib_number, event_date)
 
 
 # --- Themed A4-landscape renderer (spec §7) ---------------------------------
