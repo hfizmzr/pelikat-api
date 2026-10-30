@@ -1,12 +1,11 @@
 """
 Consent Code Security Tests (NFR: Consent codes shall be single-use and time-limited)
 """
-import pytest
 import re
-import time
-from datetime import datetime, timedelta, timezone
-from unittest.mock import patch, MagicMock
-from django.test import Client
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from apps.qr_security.services import generate_consent_code
 
@@ -35,8 +34,6 @@ class TestConsentCode:
     def test_consent_code_uses_secrets(self):
         """Consent code must use cryptographically secure random."""
         # Check that secrets.choice is used (not random.choice)
-        import apps.qr_security.services as services_module
-        import secrets
         # The function should reference secrets.choice
         import inspect
         source = inspect.getsource(generate_consent_code)
@@ -61,7 +58,7 @@ class TestConsentCode:
             data = response.json()
             
             expires_at = datetime.fromisoformat(data['expires_at'])
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             
             # Expiry should be approximately 24 hours from now
             diff = expires_at - now

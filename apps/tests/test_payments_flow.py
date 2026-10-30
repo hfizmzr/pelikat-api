@@ -5,12 +5,11 @@ plus internal-key middleware behaviour for the /payments/* surface.
 import hashlib
 import hmac
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 from django.core.management import call_command
-from django.test import Client
 
 from apps.payments import services
 from apps.payments.hitpay import HitPayError
@@ -572,11 +571,11 @@ class TestSentinelRecovery:
     verified pre-create crash — delete the sentinel and re-run the fresh
     flow once."""
 
-    OLD_TS = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    OLD_TS = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     def _recent_ts(self):
         # Computed at call time so slow CI (collection/imports between)
         # can't age a 'young' sentinel into recovery age (fixture flake).
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
     REG = '11111111-1111-1111-1111-111111111111'
 
     def _payload(self):
@@ -1028,7 +1027,7 @@ class TestRefund:
 
     def test_refund_rejects_invalid_amounts(self, api_client):
         """M3: client amount must be numeric, > 0, ≤ stored amount."""
-        payments = self._completed_payment('fpx')
+        self._completed_payment('fpx')
         for bad_amount in ('-1', '0', 'abc', '99.00'):
             with patch('apps.payments.services.get_sb',
                        return_value=_mock_sb(payments=_table(
@@ -1053,7 +1052,7 @@ class TestRefund:
                    return_value=_mock_sb(payments=payments)), \
              patch('apps.payments.services.create_refund',
                    side_effect=HitPayError('boom', status=400)):
-            status, body = services.refund_payment('pr-9', None)
+            status, _body = services.refund_payment('pr-9', None)
         assert status == 502
         # Claim released.
         release = payments.update.call_args.args[0]
@@ -1236,7 +1235,7 @@ class TestReconcileClaimLifecycle:
                                   'constraint "webhook_events_payload_hash_key"'))
         events.select.return_value.eq.return_value.maybe_single \
             .return_value.execute.return_value = MagicMock(data={
-                'received_at': (datetime.now(timezone.utc)
+                'received_at': (datetime.now(UTC)
                                 - timedelta(minutes=20)).isoformat()})
         payments = _table([{
             'provider_request_id': 'pr-9', 'registration_id': 'reg-1',
@@ -1264,7 +1263,7 @@ class TestReconcileClaimLifecycle:
         probe = events.select.return_value.eq.return_value = MagicMock(
             spec=['maybe_single'])
         probe.maybe_single.return_value.execute.return_value = MagicMock(data={
-            'received_at': (datetime.now(timezone.utc)
+            'received_at': (datetime.now(UTC)
                             - timedelta(minutes=1)).isoformat()})
         payments = _table([{
             'provider_request_id': 'pr-9', 'registration_id': 'reg-1',
@@ -1289,7 +1288,7 @@ class TestReconcileClaimLifecycle:
                                   'constraint "webhook_events_payload_hash_key"'))
         events.select.return_value.eq.return_value.maybe_single \
             .return_value.execute.return_value = MagicMock(data={
-                'received_at': (datetime.now(timezone.utc)
+                'received_at': (datetime.now(UTC)
                                 - timedelta(minutes=20)).isoformat()})
         payments = _table([{
             'provider_request_id': 'pr-9', 'registration_id': 'reg-1',
@@ -1339,7 +1338,7 @@ class TestReconcileClaimProbe:
     def test_chain_uses_supabase_py_maybe_single(self):
         """Functional pin: the wired probe chain actually calls
         supabase-py's maybe_single() (never the JS-name maybeSingle)."""
-        sb, events, probe = self._wired_sb(MagicMock(data=None))
+        sb, _events, probe = self._wired_sb(MagicMock(data=None))
         from apps.payments.services import _reconcile_claim_orphaned
         assert _reconcile_claim_orphaned(sb, 'hash-x') is False
         assert probe.maybe_single.called

@@ -2,9 +2,10 @@
 API Performance Tests (NFR: CRUD responses < 500ms under normal load)
 """
 import time
+from unittest.mock import MagicMock, patch
+
 import pytest
-from django.test import Client
-from unittest.mock import patch, MagicMock
+
 
 @pytest.mark.performance
 class TestApiPerformance:

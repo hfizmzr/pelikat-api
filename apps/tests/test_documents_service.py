@@ -28,7 +28,7 @@ def mock_supabase(monkeypatch):
 @pytest.mark.security
 class TestV2Envelope:
     def test_encrypt_document_uploads_self_describing_blob(self, mock_supabase):
-        sb, store = mock_supabase
+        sb, _store = mock_supabase
         result = services.encrypt_document(b"raw-bytes", USER)
         kwargs = sb.storage.from_().upload.call_args.kwargs
         envelope = json.loads(kwargs["file"].decode())
@@ -112,7 +112,6 @@ class TestUploadGuardrails:
 
         Uses a 66-byte synthetic PNG whose IHDR declares 20000×20000 (400MP,
         far above any cap) with an undecodable IDAT — no 1.2GB allocation. """
-        import io
         import struct
         import zlib
 

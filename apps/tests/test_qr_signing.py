@@ -1,14 +1,11 @@
 """
 QR Signing Security Tests (NFR: JWT validated on every request, HMAC-SHA256 signing)
 """
-import pytest
-import time
-import json
 import base64
-import hmac
-import hashlib
-from unittest.mock import patch
-from django.test import Client
+import json
+import time
+
+import pytest
 
 from apps.qr_security.services import sign_qr, verify_qr
 
@@ -25,7 +22,7 @@ class TestQrSigning:
         parts = token.split('.')
         assert len(parts) == 2
         
-        payload_b64, sig = parts
+        payload_b64, _sig = parts
         # Should be valid base64
         payload = json.loads(base64.urlsafe_b64decode(payload_b64).decode())
         assert payload['runner_id'] == 'runner-123'
@@ -46,7 +43,7 @@ class TestQrSigning:
     def test_verify_qr_invalid_signature(self):
         """verify_qr returns valid=False for tampered signature."""
         token = sign_qr('runner-123', 'event-456', 'B001')
-        payload_b64, sig = token.split('.')
+        payload_b64, _sig = token.split('.')
         
         # Tamper with signature
         tampered_token = f"{payload_b64}.tampered"

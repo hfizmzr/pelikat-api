@@ -2,7 +2,6 @@
 Health / Availability Tests (NFR: 99.5% uptime target)
 """
 import pytest
-from django.test import Client
 
 
 @pytest.mark.availability

@@ -1,8 +1,9 @@
 """
 Multi-tenant Scalability Tests (NFR: Support unlimited organizer tenants without schema changes)
 """
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 
 from apps.badges.services import evaluate_badges
 
@@ -39,18 +40,19 @@ class TestMultiTenant:
 
     def test_photo_processing_accepts_any_organizer_id(self):
         """process_photo accepts any organizer_id without schema changes."""
-        from apps.ai_photos.services import process_photo
-        
         # Verify the function signature accepts any organizer_id
         import inspect
+
+        from apps.ai_photos.services import process_photo
         sig = inspect.signature(process_photo)
         params = list(sig.parameters.keys())
         assert 'organizer_id' in params
 
     def test_ecert_generation_accepts_any_organizer_id(self):
         """generate_cert does not hardcode organizer references."""
-        from apps.ecert.services import generate_cert
         import inspect
+
+        from apps.ecert.services import generate_cert
         
         source = inspect.getsource(generate_cert)
         # Should not contain hardcoded organizer IDs or limits
@@ -59,6 +61,7 @@ class TestMultiTenant:
     def test_no_enum_constraint_on_organizers(self):
         """Verify there is no enum constraint on organizer_id in the codebase."""
         import inspect
+
         # This is a conceptual test - in practice, we'd query the database
         # For now, verify no hardcoded lists of organizers exist
         import apps.ai_photos.services as photo_services
