@@ -6,12 +6,10 @@ and inserts newly earned badges via service_role key.
 """
 
 import logging
-
 from datetime import date
 
-from pelikat.supabase import get_sb
-
 from apps.ecert.services import generate_cert
+from pelikat.supabase import get_sb
 
 logger = logging.getLogger(__name__)
 

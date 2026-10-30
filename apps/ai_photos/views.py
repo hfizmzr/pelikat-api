@@ -6,7 +6,12 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .reader import read_bibs_from_bytes
-from .services import read_storage_photo, process_storage_paths, process_storage_prefix, get_batch_status
+from .services import (
+    get_batch_status,
+    process_storage_paths,
+    process_storage_prefix,
+    read_storage_photo,
+)
 
 
 def get_bib_options(data):

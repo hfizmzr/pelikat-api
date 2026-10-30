@@ -4,13 +4,13 @@ QR Security Service
 HMAC-SHA256 sign and verify for QR codes.
 """
 
-import hmac
-import hashlib
-import json
 import base64
-import time
+import hashlib
+import hmac
+import json
 import secrets
 import string
+import time
 
 from django.conf import settings
 

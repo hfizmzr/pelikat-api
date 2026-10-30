@@ -12,14 +12,13 @@ import time
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from pelikat.supabase import get_sb as get_supabase_client
-
 from apps.ecert.assets import (
     MAX_BG_BYTES,
     MAX_SMALL_ASSET_BYTES,
     ThemeAssetError,
     fetch_theme_asset,
 )
+from pelikat.supabase import get_sb as get_supabase_client
 
 _log = logging.getLogger('ecert')
 

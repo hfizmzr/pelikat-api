@@ -9,16 +9,21 @@ import hashlib
 import hmac
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 
 from pelikat.supabase import get_sb
 
-from .hitpay import (HitPayError, create_payment_request, create_refund,
-                     delete_payment_request, get_payment_request,
-                     list_payment_requests)
+from .hitpay import (
+    HitPayError,
+    create_payment_request,
+    create_refund,
+    delete_payment_request,
+    get_payment_request,
+    list_payment_requests,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -351,8 +356,8 @@ def _recover_abandoned_sentinel(sb, *, order_type, registration_id,
         try:
             created = datetime.fromisoformat(str(created_at))
             if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) - created < SENTINEL_RECOVER_AFTER:
+                created = created.replace(tzinfo=UTC)
+            if datetime.now(UTC) - created < SENTINEL_RECOVER_AFTER:
                 logger.info(
                     'sentinel recovery: %s (%s) is seconds old; assuming a '
                     'live in-flight create and waiting', order_type, sentinel)
@@ -833,7 +838,7 @@ def _validated_refund_amount(amount: str | None, stored_amount: str,
     try:
         stored = Decimal(str(stored_amount))
         already = Decimal(str(refunded_amount)) if refunded_amount is not None \
-            else Decimal('0')
+            else Decimal(0)
         refund_amount = (Decimal(str(amount)) if amount is not None
                          else stored - already)
         remaining = stored - already
@@ -1014,10 +1019,10 @@ def _reconcile_claim_orphaned(sb, claim_hash: str) -> bool:
     if not isinstance(received, str):
         return False  # can't verify age → keep the conservative skip
     try:
-        ts = datetime.fromisoformat(received.replace('Z', '+00:00'))
+        ts = datetime.fromisoformat(received)
     except ValueError:
         return False
-    return (datetime.now(timezone.utc) - ts) > RECONCILE_CLAIM_TTL
+    return (datetime.now(UTC) - ts) > RECONCILE_CLAIM_TTL
 
 
 def reconcile_stale_payments() -> dict:
@@ -1031,7 +1036,7 @@ def reconcile_stale_payments() -> dict:
     reclaimed; successful runs release their claim after processing.
     """
     sb = get_sb()
-    cutoff = (datetime.now(timezone.utc) - RECONCILE_STALE_AFTER).isoformat()
+    cutoff = (datetime.now(UTC) - RECONCILE_STALE_AFTER).isoformat()
     stale = (sb.table('payments').select('*')
              .eq('status', 'pending')
              .lt('created_at', cutoff)
@@ -1049,7 +1054,7 @@ def reconcile_stale_payments() -> dict:
                 'object_id': provider_request_id,
                 'payload': {
                     'type': 'reconcile_claim',
-                    'ran_at': datetime.now(timezone.utc).isoformat(),
+                    'ran_at': datetime.now(UTC).isoformat(),
                 },
                 'payload_hash': claim_hash,
             }).execute()

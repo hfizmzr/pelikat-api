@@ -29,7 +29,7 @@ def evaluate_badges_view(request):
     try:
         result = evaluate_badges(runner_id, event_id or None)
         return Response(result)
-    except Exception:  # noqa: BLE001 — 500 guard: detail logged server-side, generic body to client
+    except Exception:
         logger.exception("badge evaluation failed for runner %s", runner_id)
         return Response({"error": "internal error"}, status=500)
 
