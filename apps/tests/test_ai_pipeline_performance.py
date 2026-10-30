@@ -2,16 +2,14 @@
 AI Pipeline Performance Tests (NFR: AI pipeline < 30s per photo on standard CPU)
 """
 import time
-import pytest
+
 import numpy as np
-from unittest.mock import patch, MagicMock
+import pytest
 
 from apps.ai_photos.reader import (
     decode_image,
-    read_bibs_from_bytes,
-    read_bibs_from_image,
     get_reader_options,
-    ReaderOptions,
+    read_bibs_from_bytes,
 )
 
 
@@ -23,6 +21,7 @@ class TestAiPipelinePerformance:
         """Decoding a valid JPEG shall take < 100ms."""
         # Create a minimal valid JPEG (simple 1x1 pixel)
         import io
+
         from PIL import Image
         img = Image.new('RGB', (1, 1), color='red')
         buf = io.BytesIO()

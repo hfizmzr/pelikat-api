@@ -78,5 +78,8 @@ def generate_cert_view(request):
             theme=theme
         )
         return Response({'cert_url': cert_url})
-    except Exception as e:
-        return Response({'error': str(e)}, status=500)
+    except Exception:  # noqa: BLE001 — 500 guard: detail logged server-side, generic body to client
+        # 500 is an internal failure — the raw exception detail must not leak
+        # to the client; log it server-side (with traceback) instead.
+        _log.exception('ecert render failed')
+        return Response({'error': 'internal error'}, status=500)

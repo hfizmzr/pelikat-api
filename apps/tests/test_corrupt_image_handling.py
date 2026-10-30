@@ -1,23 +1,21 @@
 """
 Corrupt Image Handling Reliability Tests (NFR: AI pipeline handles corrupt images gracefully)
 """
-import pytest
 import io
+from unittest.mock import MagicMock, patch
+
+import cv2
+import pytest
 from PIL import Image
-import numpy as np
-from unittest.mock import patch, MagicMock
 
 from apps.ai_photos.reader import (
     decode_image,
     read_bibs_from_bytes,
-    read_bibs_from_image,
-    get_yolo_model,
-    get_ocr_reader,
 )
 from apps.ai_photos.services import (
-    read_storage_photo,
     process_photo,
     process_storage_paths,
+    read_storage_photo,
 )
 
 
@@ -41,7 +39,7 @@ class TestCorruptImageHandling:
 
     def test_empty_bytes_raises_value_error(self):
         """Empty bytes should raise an error (ValueError or cv2.error)."""
-        with pytest.raises(Exception):
+        with pytest.raises((ValueError, cv2.error)):
             decode_image(b'')
 
     def test_read_bibs_from_bytes_raises_on_invalid_data(self):

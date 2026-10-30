@@ -13,7 +13,6 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from django.test import Client
 
 WEBHOOK_PATH = '/payments/webhook/hitpay/'
 WEBHOOK_SALT = 'test-webhook-salt'
@@ -108,6 +107,7 @@ class TestHitpayWebhookSignature:
     def test_webhook_uses_compare_digest(self):
         """Verification must use constant-time comparison (hmac.compare_digest)."""
         import inspect
+
         from apps.payments import services
 
         source = inspect.getsource(services.verify_signature)

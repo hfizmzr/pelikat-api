@@ -6,20 +6,12 @@ and inserts newly earned badges via service_role key.
 """
 
 import logging
-
 from datetime import date
 
-from supabase import create_client
-from django.conf import settings
 from apps.ecert.services import generate_cert
+from pelikat.supabase import get_sb
 
 logger = logging.getLogger(__name__)
-
-def get_sb():
-    return create_client(
-        settings.SUPABASE_URL,
-        settings.SUPABASE_SERVICE_ROLE_KEY
-    )
 
 BADGE_RULES = [
     {
@@ -225,7 +217,7 @@ def _generate_milestone_cert(
         runner_name=runner_name,
         event_name=event_name,
         bib_number=bib_number,
-        event_date=date.today().isoformat(),
+        event_date=event_date,
         registration_id=storage_id,
     )
 

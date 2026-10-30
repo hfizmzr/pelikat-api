@@ -16,6 +16,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         summary = services.reconcile_stale_payments()
         self.stdout.write(
-            'reconcile: polled=%(polled)s completed=%(completed)s '
-            'recorded=%(recorded)s' % summary
+            f"reconcile: polled={summary['polled']} "
+            f"completed={summary['completed']} "
+            f"recorded={summary['recorded']}"
         )

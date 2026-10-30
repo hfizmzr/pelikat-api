@@ -4,13 +4,13 @@ QR Security Service
 HMAC-SHA256 sign and verify for QR codes.
 """
 
-import hmac
-import hashlib
-import json
 import base64
-import time
+import hashlib
+import hmac
+import json
 import secrets
 import string
+import time
 
 from django.conf import settings
 
@@ -69,8 +69,8 @@ def verify_qr(qr_payload: str) -> dict:
         payload = json.loads(base64.urlsafe_b64decode(payload_b64).decode())
 
         return {'valid': True, **payload}
-    except Exception as e:
-        return {'valid': False, 'error': str(e)}
+    except Exception:  # noqa: BLE001 — malformed/untrusted payload: fixed generic error text
+        return {'valid': False, 'error': 'invalid payload'}
 
 
 def generate_consent_code() -> str:

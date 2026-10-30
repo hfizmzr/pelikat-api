@@ -2,18 +2,14 @@
 QR Security Views
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from django.conf import settings
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from supabase import create_client
 
-from .services import sign_qr, verify_qr, generate_consent_code
+from pelikat.supabase import get_sb as _supabase
 
-
-def _supabase():
-    return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+from .services import generate_consent_code, sign_qr, verify_qr
 
 
 @api_view(['POST'])
@@ -91,7 +87,7 @@ def consent_code(request):
 
     reg = result.data
     code = generate_consent_code()
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    expires_at = datetime.now(UTC) + timedelta(hours=24)
 
     sb.table('repc_consent_codes').update({'is_used': True})\
         .eq('registration_id', registration_id)\

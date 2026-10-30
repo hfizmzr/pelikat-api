@@ -1,10 +1,15 @@
 """
 Canonical NRIC rule-set (apps/documents/nric.py) — pure function tests.
 """
-import pytest
-from datetime import date, timedelta
+from datetime import date
 
-from apps.documents.nric import extract_nric_from_text, resolve_birth_date, validate_nric
+import pytest
+
+from apps.documents.nric import (
+    extract_nric_from_text,
+    resolve_birth_date,
+    validate_nric,
+)
 
 TODAY = date(2026, 4, 15)
 # Valid: born 2001-01-01, state 14 (Pulau Pinang), serial nonzero.

@@ -2,7 +2,6 @@
 Internal Key Middleware Security Tests (NFR: JWT validated on every API request)
 """
 import pytest
-from django.test import Client
 
 
 @pytest.mark.security
@@ -86,6 +85,7 @@ class TestInternalKeyMiddleware:
     def test_comparison_uses_compare_digest(self):
         """L1: the internal-key comparison must be constant-time."""
         import inspect
+
         from pelikat.middleware import InternalKeyMiddleware
 
         source = inspect.getsource(InternalKeyMiddleware.__call__)

@@ -9,15 +9,21 @@ import hashlib
 import hmac
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
-from supabase import create_client
 
-from .hitpay import (HitPayError, create_payment_request, create_refund,
-                     delete_payment_request, get_payment_request,
-                     list_payment_requests)
+from pelikat.supabase import get_sb
+
+from .hitpay import (
+    HitPayError,
+    create_payment_request,
+    create_refund,
+    delete_payment_request,
+    get_payment_request,
+    list_payment_requests,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +35,6 @@ NONREFUNDABLE_RAILS = {'duitnow', 'atome', 'wechat_pay', 'atome_qr'}
 QR_CAPABLE_RAILS = {'duitnow'}
 
 RECONCILE_STALE_AFTER = timedelta(minutes=15)
-
-
-def get_sb():
-    return create_client(
-        settings.SUPABASE_URL,
-        settings.SUPABASE_SERVICE_ROLE_KEY,
-    )
 
 
 # ── SIGNATURE VERIFICATION ───────────────────────────────────
@@ -116,6 +115,29 @@ def _revive_expired_payment(sb, pr_id: str | None) -> bool:
     return True
 
 
+def _confirm_rpc(sb, pr_id: str, succeeded: dict | None) -> None:
+    """Idempotent DB confirm (the same rpc confirm_payment the webhook
+    handler uses; safe to call repeatedly for one PR)."""
+    sb.rpc('confirm_payment', {
+        'p_provider_request_id': pr_id,
+        'p_provider_payment_id': succeeded.get('id') if succeeded else None,
+        'p_rail': succeeded.get('payment_type') if succeeded else None,
+    }).execute()
+
+
+def _payment_response(provider_request_id, checkout_url, qr_code,
+                      direct_link_url, status) -> dict:
+    """Single M1 response shape for create/status endpoints (fixed key
+    set and order — the BFF contract)."""
+    return {
+        'provider_request_id': provider_request_id,
+        'checkout_url': checkout_url,
+        'qr_code': qr_code,
+        'direct_link_url': direct_link_url,
+        'status': status,
+    }
+
+
 def _handle_verified_event(sb, event_type: str, data: dict) -> None:
     """Act on a verified webhook payload (insert of the dedupe row is done)."""
     if event_type == 'payment_request.completed' and data.get('status') == 'completed':
@@ -134,11 +156,7 @@ def _handle_verified_event(sb, event_type: str, data: dict) -> None:
             # no-ops on the still-expired row (status quo).
             logger.exception('expired-payment revive failed for %s',
                              data.get('id'))
-        sb.rpc('confirm_payment', {
-            'p_provider_request_id': data.get('id'),
-            'p_provider_payment_id': succeeded.get('id') if succeeded else None,
-            'p_rail': succeeded.get('payment_type') if succeeded else None,
-        }).execute()
+        _confirm_rpc(sb, data.get('id'), succeeded)
     elif event_type == 'payment_request.failed':
         # L4: without an object id the failure cannot be scoped to a row —
         # a .eq(None) filter would sweep unmatched rows. Log and skip.
@@ -191,9 +209,9 @@ def handle_webhook(raw_body: bytes, signature: str, event_type: str) -> tuple[in
     # ('payment_request.completed') or the bare kind ('completed') —
     # normalize so both hit the same branch (live-sandbox observed 2026-10-18).
     normalized_event = (event_type or '').strip().lower()
-    if normalized_event and '.' not in normalized_event:
-        if data.get('object') == 'payment_request':
-            normalized_event = f'payment_request.{normalized_event}'
+    if (normalized_event and '.' not in normalized_event
+            and data.get('object') == 'payment_request'):
+        normalized_event = f'payment_request.{normalized_event}'
 
     try:
         _handle_verified_event(sb, normalized_event, data)
@@ -260,19 +278,14 @@ def _reuse_pending_payment(existing: dict) -> tuple[int, dict]:
     status = pr.get('status', existing.get('status'))
     if existing.get('status') == 'pending' and status != 'pending':
         status = existing['status']
-    return 200, {
-        'provider_request_id': existing['provider_request_id'],
-        'checkout_url': pr.get('url'),
-        'qr_code': qr,
-        'direct_link_url': (pr.get('direct_link') or {}).get('direct_link_url'),
-        'status': status,
-    }
+    return 200, _payment_response(
+        existing['provider_request_id'],
+        pr.get('url'),
+        qr,
+        (pr.get('direct_link') or {}).get('direct_link_url'),
+        status,
+    )
 
-
-# Sentinel provider_request_id that migration 062's claim_payment_slot
-# writes on a reservation row: the caller swaps it for the real HitPay PR
-# id once the upstream create succeeds (fixed formatter pin, see docs).
-RESERVATION_PREFIX = 'pending:'
 
 # An in_progress sentinel is recoverable (adopt-or-delete) only after this
 # much time: younger sentinels are almost certainly a LIVE create still in
@@ -343,8 +356,8 @@ def _recover_abandoned_sentinel(sb, *, order_type, registration_id,
         try:
             created = datetime.fromisoformat(str(created_at))
             if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) - created < SENTINEL_RECOVER_AFTER:
+                created = created.replace(tzinfo=UTC)
+            if datetime.now(UTC) - created < SENTINEL_RECOVER_AFTER:
                 logger.info(
                     'sentinel recovery: %s (%s) is seconds old; assuming a '
                     'live in-flight create and waiting', order_type, sentinel)
@@ -497,11 +510,7 @@ def _recover_abandoned_sentinel(sb, *, order_type, registration_id,
                           if p.get('status') == 'succeeded'), None)
         confirm_ok = True
         try:
-            sb.rpc('confirm_payment', {
-                'p_provider_request_id': real_id,
-                'p_provider_payment_id': succeeded.get('id') if succeeded else None,
-                'p_rail': succeeded.get('payment_type') if succeeded else None,
-            }).execute()
+            _confirm_rpc(sb, real_id, succeeded)
         except Exception:
             # NOT finalized: leave the row pending with the real PR id —
             # webhook redelivery / reconcile (which polls pending rows)
@@ -515,35 +524,35 @@ def _recover_abandoned_sentinel(sb, *, order_type, registration_id,
             logger.info('sentinel recovery: adopted COMPLETED PR %s for %s '
                         '— finalized via confirm_payment', real_id, order_type)
             direct_link = match.get('direct_link') or {}
-            return 200, {
-                'provider_request_id': real_id,
-                'checkout_url': match.get('url'),
-                'qr_code': qr_code,
-                'direct_link_url': direct_link.get('direct_link_url'),
-                'status': match.get('status', pr_status),
-            }
+            return 200, _payment_response(
+                real_id,
+                match.get('url'),
+                qr_code,
+                direct_link.get('direct_link_url'),
+                match.get('status', pr_status),
+            )
         logger.info('sentinel recovery: adopted COMPLETED PR %s for %s — '
                     'confirmation in progress (row stays pending)',
                     real_id, order_type)
         return 200, {
-            'provider_request_id': real_id,
-            'checkout_url': match.get('url'),
-            'qr_code': qr_code,
-            'direct_link_url': (match.get('direct_link') or {})
-                .get('direct_link_url'),
-            'status': 'pending',
+            **_payment_response(
+                real_id,
+                match.get('url'),
+                qr_code,
+                (match.get('direct_link') or {}).get('direct_link_url'),
+                'pending',
+            ),
             'message': 'Payment received but confirmation is in progress',
         }
     # M1-compatible reuse shape (drives the normal GET /payments/status /
     # follow flow); the pending PR's own truth is carried in the body.
-    return 200, {
-        'provider_request_id': real_id,
-        'checkout_url': match.get('url'),
-        'qr_code': qr_code,
-        'direct_link_url': (match.get('direct_link') or {})
-            .get('direct_link_url'),
-        'status': match.get('status', pr_status),
-    }
+    return 200, _payment_response(
+        real_id,
+        match.get('url'),
+        qr_code,
+        (match.get('direct_link') or {}).get('direct_link_url'),
+        match.get('status', pr_status),
+    )
 
 
 # Sentinel-recovery protocol values for _recover_abandoned_sentinel's
@@ -767,13 +776,13 @@ def create_payment(data: dict, _attempt: int = 0) -> tuple[int, dict]:
     }).eq('provider_request_id', provider_request_id).execute()
 
     direct_link = pr.get('direct_link') or {}
-    return 201, {
-        'provider_request_id': pr.get('id'),
-        'checkout_url': pr.get('url'),
-        'qr_code': qr_code,
-        'direct_link_url': direct_link.get('direct_link_url'),
-        'status': pr.get('status', 'pending'),
-    }
+    return 201, _payment_response(
+        pr.get('id'),
+        pr.get('url'),
+        qr_code,
+        direct_link.get('direct_link_url'),
+        pr.get('status', 'pending'),
+    )
 
 
 # ── STATUS ───────────────────────────────────────────────────
@@ -829,7 +838,7 @@ def _validated_refund_amount(amount: str | None, stored_amount: str,
     try:
         stored = Decimal(str(stored_amount))
         already = Decimal(str(refunded_amount)) if refunded_amount is not None \
-            else Decimal('0')
+            else Decimal(0)
         refund_amount = (Decimal(str(amount)) if amount is not None
                          else stored - already)
         remaining = stored - already
@@ -1010,10 +1019,10 @@ def _reconcile_claim_orphaned(sb, claim_hash: str) -> bool:
     if not isinstance(received, str):
         return False  # can't verify age → keep the conservative skip
     try:
-        ts = datetime.fromisoformat(received.replace('Z', '+00:00'))
+        ts = datetime.fromisoformat(received)
     except ValueError:
         return False
-    return (datetime.now(timezone.utc) - ts) > RECONCILE_CLAIM_TTL
+    return (datetime.now(UTC) - ts) > RECONCILE_CLAIM_TTL
 
 
 def reconcile_stale_payments() -> dict:
@@ -1027,7 +1036,7 @@ def reconcile_stale_payments() -> dict:
     reclaimed; successful runs release their claim after processing.
     """
     sb = get_sb()
-    cutoff = (datetime.now(timezone.utc) - RECONCILE_STALE_AFTER).isoformat()
+    cutoff = (datetime.now(UTC) - RECONCILE_STALE_AFTER).isoformat()
     stale = (sb.table('payments').select('*')
              .eq('status', 'pending')
              .lt('created_at', cutoff)
@@ -1045,7 +1054,7 @@ def reconcile_stale_payments() -> dict:
                 'object_id': provider_request_id,
                 'payload': {
                     'type': 'reconcile_claim',
-                    'ran_at': datetime.now(timezone.utc).isoformat(),
+                    'ran_at': datetime.now(UTC).isoformat(),
                 },
                 'payload_hash': claim_hash,
             }).execute()
@@ -1070,12 +1079,7 @@ def reconcile_stale_payments() -> dict:
                 raise
 
         try:
-            try:
-                pr = get_payment_request(provider_request_id)
-            except Exception as exc:
-                logger.warning('Reconcile poll failed for %s: %s',
-                               provider_request_id, exc)
-                raise
+            pr = get_payment_request(provider_request_id)
             summary['polled'] += 1
             status = pr.get('status')
 
@@ -1083,11 +1087,7 @@ def reconcile_stale_payments() -> dict:
                 payments = pr.get('payments') or []
                 succeeded = next(
                     (p for p in payments if p.get('status') == 'succeeded'), None)
-                sb.rpc('confirm_payment', {
-                    'p_provider_request_id': provider_request_id,
-                    'p_provider_payment_id': succeeded.get('id') if succeeded else None,
-                    'p_rail': succeeded.get('payment_type') if succeeded else None,
-                }).execute()
+                _confirm_rpc(sb, provider_request_id, succeeded)
                 # W2: the charge reference is now known (confirm_payment wrote
                 # provider_payment_id), so a stuck 'no_charge_reference' marker
                 # must be released — otherwise refunds 409 forever. Guarded:

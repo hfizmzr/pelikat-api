@@ -1,7 +1,7 @@
 import os
+
 import pytest
-from django.test import Client, override_settings
-from django.conf import settings
+from django.test import Client
 
 # Ensure test environment
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'pelikat.settings')

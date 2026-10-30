@@ -1,8 +1,9 @@
 """
 Idempotency Reliability Tests (NFR: All collection and order transactions shall be idempotent)
 """
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock, call
 
 from apps.badges.services import evaluate_badges
 from apps.ecert.services import generate_cert
@@ -71,8 +72,9 @@ class TestIdempotency:
 
     def test_photo_tag_upsert(self):
         """process_photo deletes old tags before inserting new ones, ensuring idempotency."""
-        from apps.ai_photos.services import process_photo
         import inspect
+
+        from apps.ai_photos.services import process_photo
         
         source = inspect.getsource(process_photo)
         # Should delete existing tags before inserting new ones
@@ -83,8 +85,9 @@ class TestIdempotency:
         """REPC check-in RPC should be idempotent (same BIB checked in twice should not error)."""
         # This is tested at the RPC level in Supabase
         # Here we verify the frontend action calls an RPC (not a direct insert)
-        from apps.ai_photos.services import get_supabase_client
         import inspect
+
+        from apps.ai_photos.services import get_supabase_client
         
         # The RPC approach is inherently more idempotent than direct inserts
         # We verify the pattern exists

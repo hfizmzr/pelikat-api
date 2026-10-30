@@ -46,7 +46,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from django.conf import settings
 from PIL import Image  # module unwarped: header peek only, no full decode
-from supabase import create_client
+
+from pelikat.supabase import get_sb as get_supabase_client
 
 from .mrz import parse_td3, passport_number_valid
 from .nric import extract_nric_from_text, validate_nric
@@ -58,11 +59,6 @@ BUCKET = "ic-documents"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024      # mirrors frontend "Max 10MB"
 MAX_IMAGE_DIMENSION = 8000               # px per side
 MAX_IMAGE_PIXELS = 24_000_000            # ≤ 24MP
-
-_MAGIC_HEADS = (
-    (b"\xff\xd8\xff", "image/jpeg"),
-    (b"\x89PNG\r\n\x1a\n", "image/png"),
-)
 
 _KEYWORDS = [
     r"KAD PENGENALAN", r"IDENTITY CARD", r"WARGA NEGARA",
@@ -112,13 +108,6 @@ def run_ocr(image):
             logger.exception("ocr.ocr() failed — reinitializing predictor once")
             _ocr = None
             return _get_ocr().ocr(image)
-
-
-def get_supabase_client():
-    return create_client(
-        settings.SUPABASE_URL,
-        settings.SUPABASE_SERVICE_ROLE_KEY
-    )
 
 
 # ── v2 envelope: per-user HKDF key + user-bound AAD ──────────────────

@@ -44,6 +44,16 @@ def _is_uuid(value) -> bool:
     return True
 
 
+def _ensure_dob_gender_valid(data) -> Response | None:
+    """400 when the optional dob/gender fields are non-strings."""
+    dob, gender = data.get("dob"), data.get("gender")
+    if dob and not isinstance(dob, str):
+        return Response({"error": "dob must be a string"}, status=400)
+    if gender and not isinstance(gender, str):
+        return Response({"error": "gender must be a string"}, status=400)
+    return None
+
+
 @api_view(["POST"])
 @parser_classes([BoundedMultiPartParser])
 @throttle_classes(_THROTTLES)
@@ -73,12 +83,6 @@ def encrypt_view(request):
 
     if not _is_uuid(user_id):
         return Response({"error": "user_id must be a UUID"}, status=400)
-
-    declared = request.headers.get("Content-Length")
-    if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES + 1024:
-        return Response(
-            {"error": "Document exceeds the 10MB limit. Please upload a smaller photo."},
-            status=413)
 
     # Stream-read with a hard byte cap BEFORE assembling the full buffer.
     # (also rejects File objects whose declared size lies — no memory bomb)
@@ -114,10 +118,9 @@ def encrypt_view(request):
 
     dob = request.data.get("dob") or None
     gender = request.data.get("gender") or None
-    if dob and not isinstance(dob, str):
-        return Response({"error": "dob must be a string"}, status=400)
-    if gender and not isinstance(gender, str):
-        return Response({"error": "gender must be a string"}, status=400)
+    early = _ensure_dob_gender_valid(request.data)
+    if early:
+        return early
 
     validation = validate_document(file_bytes, dob=dob, gender=gender)
 
@@ -174,10 +177,9 @@ def encrypt_ic_view(request):
     user_id = data.get("user_id")
     dob = data.get("dob") or None
     gender = data.get("gender") or None
-    if dob and not isinstance(dob, str):
-        return Response({"error": "dob must be a string"}, status=400)
-    if gender and not isinstance(gender, str):
-        return Response({"error": "gender must be a string"}, status=400)
+    early = _ensure_dob_gender_valid(data)
+    if early:
+        return early
 
     if not ic_number or not user_id:
         return Response({"error": "ic_number and user_id are required"}, status=400)
