@@ -5,6 +5,7 @@ plus internal-key middleware behaviour for the /payments/* surface.
 import hashlib
 import hmac
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +23,8 @@ def _table(data=None):
     t = MagicMock()
     t.select.return_value.eq.return_value.limit.return_value.execute.return_value = \
         MagicMock(data=data if data is not None else [])
+    t.select.return_value.or_.return_value.order.return_value.limit.return_value \
+        .execute.return_value = MagicMock(data=data if data is not None else [])
     t.select.return_value.eq.return_value.lt.return_value.execute.return_value = \
         MagicMock(data=data if data is not None else [])
     t.select.return_value.eq.return_value.order.return_value.limit.return_value \
@@ -946,6 +949,223 @@ class TestPaymentStatus:
                 '/payments/status?reference_number=nope', **_auth()
             )
         assert response.status_code == 404
+
+
+@pytest.mark.reliability
+class TestMerchFinalizeSelfHeal:
+    """CodeRabbit PR#17 (thread PRRT_kwDOSKXhgc6yOekg): if
+    merch_confirm_payment fails after confirm_payment succeeded, the
+    payment row is completed and the webhook (one-shot), status-poll
+    pending branch and reconcile (pending rows only) all skip it — the
+    merch order would stay pending forever. A completed row must
+    re-run the idempotent finalize on the next status poll."""
+
+    def _merch_row(self, **overrides):
+        row = {'status': 'completed', 'payment_rail': None,
+               'provider_request_id': 'pr-m-1',
+               'order_type': 'merch', 'merch_order_id': 'mo-21'}
+        row.update(overrides)
+        return row
+
+    def _webhook_body(self):
+        return json.dumps({
+            'id': 'pr-m-1',
+            'object': 'payment_request',
+            'status': 'completed',
+            'reference_number': 'mo-21',
+            'payments': [{
+                'id': 'pay-m-1',
+                'status': 'succeeded',
+                'amount': '49.00',
+                'payment_type': 'fpx',
+            }],
+        }).encode()
+
+    def _sign(self, body: bytes) -> str:
+        return hmac.new(WEBHOOK_SALT.encode(), body, hashlib.sha256) \
+            .hexdigest()
+
+    def _merch_finalize_calls(self, sb):
+        return [c for c in sb.rpc.call_args_list
+                if c.args[0] == 'merch_confirm_payment']
+
+    def test_webhook_survives_finalize_failure_and_status_poll_heals(self):
+        payments = _table([self._merch_row()])
+        sb = _mock_sb(payments=payments)
+        body = self._webhook_body()
+
+        # Attempt 1: confirm_payment (rpc) succeeds at the DB, but the
+        # merch finalize raises — the webhook must still answer 200 and
+        # the order must stay pending (no merch_confirm_payment call).
+        with patch('apps.payments.services.get_sb', return_value=sb), \
+             patch.object(services, '_finalize_merch_order',
+                          side_effect=RuntimeError('db hiccup')) as forced:
+            status, resp_body = services.handle_webhook(
+                body, self._sign(body), 'payment_request.completed')
+        assert status == 200
+        assert resp_body == {'status': 'handler_error'}
+        forced.assert_called_once()
+        assert self._merch_finalize_calls(sb) == []  # order still pending
+
+        # Attempt 2 (self-heal): the next status poll for the SAME PR
+        # reference re-runs the idempotent merch finalize — no 500, and
+        # the rpc gets the exact confirm args it needs.
+        with patch('apps.payments.services.get_sb', return_value=sb):
+            status, body = services.get_payment_status('mo-21')
+        assert status == 200
+        assert body['status'] == 'completed'
+        assert body['provider_request_id'] == 'pr-m-1'
+        finalize_calls = self._merch_finalize_calls(sb)
+        assert len(finalize_calls) == 1
+        assert finalize_calls[0].args[1] == {
+            'p_order_id': 'mo-21',
+            'p_payment_ref': 'pr-m-1',
+            'p_payment_method': None,  # keep the checkout-time method
+        }
+
+        # Attempt 3 (idempotence): a repeat status poll re-runs the rpc
+        # with identical args (062 same-payment_ref idempotency) and
+        # stays a 200 completed read — never a 500, no state change.
+        with patch('apps.payments.services.get_sb', return_value=sb):
+            status, body = services.get_payment_status('mo-21')
+        assert status == 200
+        assert body['status'] == 'completed'
+        finalize_calls = self._merch_finalize_calls(sb)
+        assert len(finalize_calls) == 2
+        assert finalize_calls[1].args[1] == finalize_calls[0].args[1]
+
+    def test_webhook_rpc_failure_answered_ok_and_status_poll_heals_via_helper(self):
+        """Companion to the forced-finalize test above: there the helper
+        is replaced, so its try/except never runs. Here the REAL
+        _finalize_merch_order runs and the merch_confirm_payment rpc
+        raises at its actual call site — the webhook must still answer
+        'ok' (the helper swallows it, no handler_error), the payment row
+        stays completed, and the next status poll retries the rpc
+        through the very same helper."""
+
+        payments = _table([self._merch_row()])
+        sb = _mock_sb(payments=payments)
+
+        def _rpc_raiser(name, payload=None):
+            if name == 'merch_confirm_payment':
+                raise RuntimeError('merch rpc down')
+            return MagicMock()  # confirm_payment etc. behave normally
+
+        sb.rpc.side_effect = _rpc_raiser
+        body = self._webhook_body()
+        with patch('apps.payments.services.get_sb', return_value=sb):
+            status, resp_body = services.handle_webhook(
+                body, self._sign(body), 'payment_request.completed')
+        assert status == 200
+        assert resp_body == {'status': 'ok'}  # helper swallowed the failure
+        assert len(self._merch_finalize_calls(sb)) == 1  # attempted once
+
+        # Self-heal: same mock, rpc healthy again — the completed row's
+        # status-poll finalize retry runs the real helper end-to-end.
+        sb.rpc.side_effect = None
+        with patch('apps.payments.services.get_sb', return_value=sb):
+            status, body = services.get_payment_status('mo-21')
+        assert status == 200
+        assert body['status'] == 'completed'
+        finalize_calls = self._merch_finalize_calls(sb)
+        assert len(finalize_calls) == 2  # rpc retried through the helper
+        assert finalize_calls[1].args[1] == {
+            'p_order_id': 'mo-21',
+            'p_payment_ref': 'pr-m-1',
+            'p_payment_method': None,
+        }
+
+    def test_completed_non_merch_row_finalize_is_a_no_op_select(self):
+        """A completed registration row surfaced by the status read must
+        not trigger any merch rpc (the finalize's row lookup filters on
+        order_type='merch' + merch_order_id)."""
+        payments = _table([{'status': 'completed', 'payment_rail': 'fpx',
+                            'provider_request_id': 'pr-9',
+                            'order_type': 'registration'}])
+        sb = _mock_sb(payments=payments)
+        with patch('apps.payments.services.get_sb', return_value=sb):
+            status, body = services.get_payment_status('reg-1')
+        assert status == 200
+        assert body['status'] == 'completed'
+        assert self._merch_finalize_calls(sb) == []
+        assert sb.rpc.call_args_list == []  # nothing re-confirmed
+
+
+@pytest.mark.reliability
+class TestStatusPollHitPayThrottle:
+    """CodeRabbit PR#17 (thread PRRT_kwDOSKXhgc6yOeki): the pending
+    branch of get_payment_status must not call HitPay synchronously on
+    every read (up to 20s each; concurrent polls can starve all gunicorn
+    workers). Throttle by provider_request_id: skip when the PR was
+    polled within the last few seconds and report the last known state."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_throttle(self):
+        services._STATUS_POLL_LAST_CHECK.clear()
+        yield
+        services._STATUS_POLL_LAST_CHECK.clear()
+
+    def _pending_status(self):
+        payments = _table([{'status': 'pending', 'payment_rail': None,
+                            'provider_request_id': 'pr-9'}])
+        with patch('apps.payments.services.get_sb',
+                   return_value=_mock_sb(payments=payments)):
+            return services.get_payment_status('reg-1')
+
+    def test_remote_call_skipped_on_immediate_second_check(self):
+        with patch('apps.payments.services.get_payment_request',
+                   return_value={'status': 'pending'}) as remote:
+            status, body = self._pending_status()
+            assert status == 200
+            assert body['status'] == 'pending'
+            assert remote.call_count == 1  # first read polls HitPay
+
+            status, body = self._pending_status()
+            assert status == 200
+            assert body == {'status': 'pending', 'payment_rail': None,
+                            'provider_request_id': 'pr-9'}
+            assert remote.call_count == 1  # throttled: no second HitPay call
+
+    def test_remote_call_executed_again_after_window(self):
+        with patch('apps.payments.services.get_payment_request',
+                   return_value={'status': 'pending'}) as remote:
+            status, body = self._pending_status()
+            assert status == 200
+            assert remote.call_count == 1
+
+            # Age the recorded attempt past the throttle window.
+            services._STATUS_POLL_LAST_CHECK['pr-9'] = (
+                time.monotonic() - services.STATUS_POLL_THROTTLE_SECONDS - 1)
+
+            status, body = self._pending_status()
+            assert status == 200
+            assert body['status'] == 'pending'
+            assert remote.call_count == 2  # window elapsed: polled again
+
+    def _slow_remote(self, pr_id):
+        """Simulate a ~20s gateway slowdown: by the time the remote call
+        RETURNS the recorded attempt-start is already >3s old."""
+        services._STATUS_POLL_LAST_CHECK[pr_id] = \
+            time.monotonic() - services.STATUS_POLL_THROTTLE_SECONDS - 17
+        return {'status': 'pending'}
+
+    def test_slow_remote_call_rearms_cooldown_on_completion(self):
+        """The cooldown re-arms from COMPLETION time (not just the call
+        start), so a slow HitPay call does not free the very next read —
+        the worker still reports the stored status instead of polling."""
+        with patch('apps.payments.services.get_payment_request',
+                   side_effect=self._slow_remote) as remote:
+            status, body = self._pending_status()  # call "takes 20s"
+            assert status == 200
+            assert body['status'] == 'pending'
+            # Cooldown re-armed at completion (call finished moments ago).
+            assert services._STATUS_POLL_LAST_CHECK['pr-9'] > (
+                time.monotonic() - services.STATUS_POLL_THROTTLE_SECONDS)
+
+            status, body = self._pending_status()
+            assert status == 200
+            assert body['status'] == 'pending'
+            assert remote.call_count == 1  # throttled after the slow call
 
 
 @pytest.mark.reliability

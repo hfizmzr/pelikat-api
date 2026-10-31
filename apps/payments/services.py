@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -123,6 +124,39 @@ def _confirm_rpc(sb, pr_id: str, succeeded: dict | None) -> None:
         'p_provider_payment_id': succeeded.get('id') if succeeded else None,
         'p_rail': succeeded.get('payment_type') if succeeded else None,
     }).execute()
+    _finalize_merch_order(sb, pr_id)
+
+
+def _finalize_merch_order(sb, pr_id: str) -> None:
+    """059 leaves merch_orders transitions to the Django service: the
+    existing merch_confirm_payment rpc (062, service role; idempotent by
+    payment_ref) does pending → confirmed + paid_at. Best-effort — an
+    expired/cancelled reservation cannot be confirmed and must never
+    fail the surrounding confirm (the webhook would release its event
+    for redelivery instead of finishing). A completed payment row gets
+    a later retry of this finalize from the status poll (the webhook is
+    one-shot and reconcile only polls pending rows)."""
+    row = None
+    try:
+        rows = (sb.table('payments').select('order_type,merch_order_id')
+                .eq('provider_request_id', pr_id).limit(1).execute())
+        row = next((r for r in (rows.data or [])
+                    if r.get('order_type') == 'merch'
+                    and r.get('merch_order_id')), None)
+        if row:
+            sb.rpc('merch_confirm_payment', {
+                'p_order_id': row['merch_order_id'],
+                'p_payment_ref': pr_id,
+                'p_payment_method': None,  # keep the checkout-time method
+            }).execute()
+            logger.info('merch order %s confirmed for PR %s',
+                        row['merch_order_id'], pr_id)
+    except Exception:
+        logger.exception('merch_confirm_payment best-effort failed for '
+                         'PR %s — merch order %s left pending; retried '
+                         'by the status-poll finalize retry (no '
+                         'double-finalize risk)', pr_id,
+                         row['merch_order_id'] if row else '?')
 
 
 def _payment_response(provider_request_id, checkout_url, qr_code,
@@ -207,10 +241,14 @@ def handle_webhook(raw_body: bytes, signature: str, event_type: str) -> tuple[in
 
     # HitPay sends the event name as either the dotted form
     # ('payment_request.completed') or the bare kind ('completed') —
-    # normalize so both hit the same branch (live-sandbox observed 2026-10-18).
+    # normalize so both hit the same branch (live-sandbox observed 2026-10-18;
+    # 2026-10-31: touch_n_go PR payloads carry NO 'object' key at all,
+    # so an absent object re-scopes too — only explicitly different
+    # objects like 'charge' are left alone).
+
     normalized_event = (event_type or '').strip().lower()
     if (normalized_event and '.' not in normalized_event
-            and data.get('object') == 'payment_request'):
+            and data.get('object') in (None, 'payment_request')):
         normalized_event = f'payment_request.{normalized_event}'
 
     try:
@@ -787,12 +825,59 @@ def create_payment(data: dict, _attempt: int = 0) -> tuple[int, dict]:
 
 # ── STATUS ───────────────────────────────────────────────────
 
+# CodeRabbit PR#17: the pending branch calls HitPay synchronously (up to
+# 20s). A per-process in-memory throttle keyed by provider_request_id
+# keeps repeated status reads from occupying all gunicorn workers during
+# a gateway slowdown: a check is skipped when the PR was already polled
+# in the last few seconds, and the cooldown re-arms at COMPLETION so a
+# slow (20s) gateway call does not free the next read immediately. Per-worker semantics by design (4 sync
+# workers = 4 independent caches — bounded opportunism, no cross-worker
+# coordination needed); the verified webhook remains the primary
+# confirm path, a throttled worker simply reports the last known state.
+STATUS_POLL_THROTTLE_SECONDS = 3
+_STATUS_POLL_MAX_KEYS = 1000
+_STATUS_POLL_TTL_SECONDS = 600  # prune entries older than 10 minutes
+_STATUS_POLL_LAST_CHECK: dict[str, float] = {}
+
+
+def _status_poll_throttled(pr_id: str) -> bool:
+    """True when the synchronous HitPay poll for pr_id should be skipped
+    (attempted less than STATUS_POLL_THROTTLE_SECONDS ago). Records the
+    attempt otherwise — before the call, so failures throttle too."""
+    now = time.monotonic()
+    last = _STATUS_POLL_LAST_CHECK.get(pr_id)
+    if last is not None and now - last < STATUS_POLL_THROTTLE_SECONDS:
+        return True
+    _STATUS_POLL_LAST_CHECK[pr_id] = now
+    if len(_STATUS_POLL_LAST_CHECK) > _STATUS_POLL_MAX_KEYS:
+        cutoff = now - _STATUS_POLL_TTL_SECONDS
+        for key, ts in list(_STATUS_POLL_LAST_CHECK.items()):
+            if ts < cutoff:
+                del _STATUS_POLL_LAST_CHECK[key]
+        # Coderabbit PR#17: within a burst window every entry is younger
+        # than the TTL, so the prune above never fires and the dict grows
+        # per distinct provider_request_id. Evict oldest beyond the cap.
+        while len(_STATUS_POLL_LAST_CHECK) > _STATUS_POLL_MAX_KEYS:
+            oldest = min(_STATUS_POLL_LAST_CHECK, key=_STATUS_POLL_LAST_CHECK.get)
+            del _STATUS_POLL_LAST_CHECK[oldest]
+    return False
+
+
+def _status_poll_finished(pr_id: str) -> None:
+    """Re-arm the cooldown from COMPLETION time (Coderabbit PR#17): a
+    slow 20s HitPay call must not leave the very next read unthrottled
+    the instant it returns."""
+    _STATUS_POLL_LAST_CHECK[pr_id] = time.monotonic()
+
+
 def get_payment_status(reference_number: str) -> tuple[int, dict]:
-    """Latest payment row for a reference number (registration_id)."""
+    """Latest payment row for a reference number (the same
+    registration_id or merch_order_id the PR's reference_number carries)."""
     sb = get_sb()
     result = (sb.table('payments')
               .select('status,payment_rail,provider_request_id')
-              .eq('registration_id', reference_number)
+              .or_(f'registration_id.eq.{reference_number},'
+                   f'merch_order_id.eq.{reference_number}')
               .order('created_at', desc=True)
               .limit(1)
               .execute())
@@ -800,6 +885,46 @@ def get_payment_status(reference_number: str) -> tuple[int, dict]:
     if not rows:
         return 404, {'error': 'Payment not found'}
     row = rows[0]
+
+    # Loading-hang fallback: the webhook may still be in flight (or was
+    # lost) while the buyer is already back on the app. Mirror the
+    # reconcile poll (get payment request → same idempotent confirm path)
+    # so a completed checkout finalizes on the next status read. Any
+    # HitPay/DB error keeps the last known status — never a 500 here.
+    if row['status'] == 'pending' and row.get('provider_request_id'):
+        try:
+            if not _status_poll_throttled(row['provider_request_id']):
+                try:
+                    pr = get_payment_request(row['provider_request_id'])
+                finally:
+                    # Cooldown from completion/failure time: a slow call
+                    # must not free the next read immediately.
+                    _status_poll_finished(row['provider_request_id'])
+                if pr.get('status') == 'completed':
+                    succeeded = next(
+                        (p for p in pr.get('payments') or []
+                         if p.get('status') == 'succeeded'), None)
+                    _confirm_rpc(sb, row['provider_request_id'], succeeded)
+                    reloaded = (sb.table('payments')
+                                .select('status,payment_rail,provider_request_id')
+                                .eq('provider_request_id',
+                                    row['provider_request_id'])
+                                .limit(1).execute())
+                    if reloaded.data:
+                        row = reloaded.data[0]
+        except Exception:
+            logger.exception('status poll fallback failed for %s',
+                             row.get('provider_request_id'))
+
+    # CodeRabbit PR#17: a row ALREADY completed whose merch finalize
+    # failed at webhook time gets no other retry — the webhook is
+    # one-shot and reconcile only polls pending rows — so re-run the
+    # idempotent merch finalize here on the next status poll
+    # (self-healing; _finalize_merch_order is best-effort/never raises,
+    # so this can never 500 the read or double-confirm).
+    if row['status'] == 'completed' and row.get('provider_request_id'):
+        _finalize_merch_order(sb, row['provider_request_id'])
+
     return 200, {
         'status': row['status'],
         'payment_rail': row.get('payment_rail'),

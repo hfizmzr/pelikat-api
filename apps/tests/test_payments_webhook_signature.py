@@ -242,6 +242,35 @@ class TestWebhookEventTypeHeaderContract:
         assert response.status_code == 200
         mock_sb.rpc.assert_not_called()
 
+    def test_dotless_event_with_no_object_field_confirms(self, api_client):
+        """Live sandbox HitPay (observed 2026-10-31, touch_n_go rail) sends
+        the bare event name AND a payload with NO 'object' key at all —
+        the PR fields (url/purpose/payments[]) prove it is a
+        payment_request webhook, so it must re-scope and confirm."""
+        mock_sb = MagicMock()
+        body = json.dumps({
+            'id': 'pr-live-1',
+            'url': 'https://checkout.sandbox.hit-pay.com/x/checkout',
+            'status': 'completed',
+            'purpose': 'Organizer subscription',
+            'payments': [{
+                'id': 'pay-1',
+                'status': 'succeeded',
+                'amount': '99.00',
+                'payment_type': 'touch_n_go',
+            }],
+        }).encode()
+        response = self._post(api_client, mock_sb, body, 'completed')
+        assert response.status_code == 200
+        mock_sb.rpc.assert_called_once_with(
+            'confirm_payment',
+            {
+                'p_provider_request_id': 'pr-live-1',
+                'p_provider_payment_id': 'pay-1',
+                'p_rail': 'touch_n_go',
+            },
+        )
+
     def test_dotted_event_type_still_confirms(self, api_client):
         """The legacy dotted form must keep working after normalization."""
         mock_sb = MagicMock()
