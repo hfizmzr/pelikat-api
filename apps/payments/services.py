@@ -123,6 +123,34 @@ def _confirm_rpc(sb, pr_id: str, succeeded: dict | None) -> None:
         'p_provider_payment_id': succeeded.get('id') if succeeded else None,
         'p_rail': succeeded.get('payment_type') if succeeded else None,
     }).execute()
+    _finalize_merch_order(sb, pr_id)
+
+
+def _finalize_merch_order(sb, pr_id: str) -> None:
+    """059 leaves merch_orders transitions to the Django service: the
+    existing merch_confirm_payment rpc (062, service role; idempotent by
+    payment_ref) does pending → confirmed + paid_at. Best-effort — an
+    expired/cancelled reservation cannot be confirmed and must never
+    fail the surrounding confirm (the webhook would release its event
+    for redelivery instead of finishing)."""
+    try:
+        rows = (sb.table('payments').select('order_type,merch_order_id')
+                .eq('provider_request_id', pr_id).limit(1).execute())
+        row = next((r for r in (rows.data or [])
+                    if r.get('order_type') == 'merch'
+                    and r.get('merch_order_id')), None)
+        if row:
+            sb.rpc('merch_confirm_payment', {
+                'p_order_id': row['merch_order_id'],
+                'p_payment_ref': pr_id,
+                'p_payment_method': None,  # keep the checkout-time method
+            }).execute()
+            logger.info('merch order %s confirmed for PR %s',
+                        row['merch_order_id'], pr_id)
+    except Exception:
+        logger.exception('merch_confirm_payment best-effort failed for '
+                         'PR %s — leaving the order to the runner '
+                         '(no double-finalize risk)', pr_id)
 
 
 def _payment_response(provider_request_id, checkout_url, qr_code,
@@ -800,6 +828,31 @@ def get_payment_status(reference_number: str) -> tuple[int, dict]:
     if not rows:
         return 404, {'error': 'Payment not found'}
     row = rows[0]
+
+    # Loading-hang fallback: the webhook may still be in flight (or was
+    # lost) while the buyer is already back on the app. Mirror the
+    # reconcile poll (get payment request → same idempotent confirm path)
+    # so a completed checkout finalizes on the next status read. Any
+    # HitPay/DB error keeps the last known status — never a 500 here.
+    if row['status'] == 'pending' and row.get('provider_request_id'):
+        try:
+            pr = get_payment_request(row['provider_request_id'])
+            if pr.get('status') == 'completed':
+                succeeded = next(
+                    (p for p in pr.get('payments') or []
+                     if p.get('status') == 'succeeded'), None)
+                _confirm_rpc(sb, row['provider_request_id'], succeeded)
+                reloaded = (sb.table('payments')
+                            .select('status,payment_rail,provider_request_id')
+                            .eq('provider_request_id',
+                                row['provider_request_id'])
+                            .limit(1).execute())
+                if reloaded.data:
+                    row = reloaded.data[0]
+        except Exception:
+            logger.exception('status poll fallback failed for %s',
+                             row.get('provider_request_id'))
+
     return 200, {
         'status': row['status'],
         'payment_rail': row.get('payment_rail'),
