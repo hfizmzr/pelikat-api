@@ -71,15 +71,15 @@ class TestIdempotency:
                 assert c.kwargs['file_options']['upsert'] == 'true'
 
     def test_photo_tag_upsert(self):
-        """process_photo deletes old tags before inserting new ones, ensuring idempotency."""
+        """process_photo replaces a photo's AI tags (delete + insert in one transaction), ensuring idempotency."""
         import inspect
 
-        from apps.ai_photos.services import process_photo
-        
-        source = inspect.getsource(process_photo)
-        # Should delete existing tags before inserting new ones
-        assert 'delete' in source
-        assert 'insert' in source
+        from apps.ai_photos.services import process_photo, replace_ai_tags
+
+        # The delete and insert run together in replace_ai_photo_tags (migration 088),
+        # so reprocessing never duplicates rows or leaves a photo half-written.
+        assert 'replace_ai_tags' in inspect.getsource(process_photo)
+        assert "'replace_ai_photo_tags'" in inspect.getsource(replace_ai_tags)
 
     def test_repc_check_in_idempotent(self):
         """REPC check-in RPC should be idempotent (same BIB checked in twice should not error)."""

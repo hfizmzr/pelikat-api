@@ -46,6 +46,12 @@ docker-compose -f docker-compose.dev.yml up --build
 docker-compose up --build
 ```
 
+Both compose files start two services: `api` (gunicorn / runserver) and
+`photo-worker` (`python manage.py run_photo_worker`), which processes queued
+photo batches in the background. Run exactly one `photo-worker`. It needs
+migrations `087_photo_batches_queue` and `088_photo_tags_review_provenance`
+(pelikat-web) applied.
+
 ## Tests
 
 ```bash
@@ -74,9 +80,9 @@ All `/ai/*` and `/payments/*` endpoints require the `X-Internal-Key` header matc
 |----------|--------|-------------|
 | `/ai/photos/read` | POST | OCR photos uploaded directly |
 | `/ai/photos/read-storage` | POST | OCR photos from Supabase storage |
-| `/ai/photos/process` | POST | Run YOLO → OCR → write `photo_tags` |
-| `/ai/photos/process-prefix` | POST | Process photos by storage path prefix |
-| `/ai/photos/status/<batch_id>` | GET | Get processing status for a batch |
+| `/ai/photos/process` | POST | Queue photos for the worker (YOLO → OCR → `photo_tags`); returns 202 + batch |
+| `/ai/photos/process-prefix` | POST | Queue every photo under a storage prefix as a reprocess batch; returns 202 |
+| `/ai/photos/status/<batch_id>` | GET | Batch status and per-photo counts (auto-tagged, flagged, no bib, failed) |
 | `/ai/qr/sign` | POST | Generate HMAC-SHA256 signed QR |
 | `/ai/qr/verify` | POST | Verify scanned QR payload |
 | `/ai/qr/consent-code` | POST | Consent code endpoint |

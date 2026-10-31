@@ -18,6 +18,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY pelikat/ ./pelikat/
 COPY apps/ ./apps/
+# YOLO bib detector used by the photo worker (AI_PHOTOS_YOLO_MODEL_PATH default)
+COPY models/ ./models/
 COPY manage.py .
 
 RUN python manage.py collectstatic --noinput || true
