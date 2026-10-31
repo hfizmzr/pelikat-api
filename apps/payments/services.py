@@ -235,10 +235,14 @@ def handle_webhook(raw_body: bytes, signature: str, event_type: str) -> tuple[in
 
     # HitPay sends the event name as either the dotted form
     # ('payment_request.completed') or the bare kind ('completed') —
-    # normalize so both hit the same branch (live-sandbox observed 2026-10-18).
+    # normalize so both hit the same branch (live-sandbox observed 2026-10-18;
+    # 2026-10-31: touch_n_go PR payloads carry NO 'object' key at all,
+    # so an absent object re-scopes too — only explicitly different
+    # objects like 'charge' are left alone).
+
     normalized_event = (event_type or '').strip().lower()
     if (normalized_event and '.' not in normalized_event
-            and data.get('object') == 'payment_request'):
+            and data.get('object') in (None, 'payment_request')):
         normalized_event = f'payment_request.{normalized_event}'
 
     try:
