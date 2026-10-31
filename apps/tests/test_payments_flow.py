@@ -1034,6 +1034,47 @@ class TestMerchFinalizeSelfHeal:
         assert len(finalize_calls) == 2
         assert finalize_calls[1].args[1] == finalize_calls[0].args[1]
 
+    def test_webhook_rpc_failure_answered_ok_and_status_poll_heals_via_helper(self):
+        """Companion to the forced-finalize test above: there the helper
+        is replaced, so its try/except never runs. Here the REAL
+        _finalize_merch_order runs and the merch_confirm_payment rpc
+        raises at its actual call site — the webhook must still answer
+        'ok' (the helper swallows it, no handler_error), the payment row
+        stays completed, and the next status poll retries the rpc
+        through the very same helper."""
+
+        payments = _table([self._merch_row()])
+        sb = _mock_sb(payments=payments)
+
+        def _rpc_raiser(name, payload=None):
+            if name == 'merch_confirm_payment':
+                raise RuntimeError('merch rpc down')
+            return MagicMock()  # confirm_payment etc. behave normally
+
+        sb.rpc.side_effect = _rpc_raiser
+        body = self._webhook_body()
+        with patch('apps.payments.services.get_sb', return_value=sb):
+            status, resp_body = services.handle_webhook(
+                body, self._sign(body), 'payment_request.completed')
+        assert status == 200
+        assert resp_body == {'status': 'ok'}  # helper swallowed the failure
+        assert len(self._merch_finalize_calls(sb)) == 1  # attempted once
+
+        # Self-heal: same mock, rpc healthy again — the completed row's
+        # status-poll finalize retry runs the real helper end-to-end.
+        sb.rpc.side_effect = None
+        with patch('apps.payments.services.get_sb', return_value=sb):
+            status, body = services.get_payment_status('mo-21')
+        assert status == 200
+        assert body['status'] == 'completed'
+        finalize_calls = self._merch_finalize_calls(sb)
+        assert len(finalize_calls) == 2  # rpc retried through the helper
+        assert finalize_calls[1].args[1] == {
+            'p_order_id': 'mo-21',
+            'p_payment_ref': 'pr-m-1',
+            'p_payment_method': None,
+        }
+
     def test_completed_non_merch_row_finalize_is_a_no_op_select(self):
         """A completed registration row surfaced by the status read must
         not trigger any merch rpc (the finalize's row lookup filters on

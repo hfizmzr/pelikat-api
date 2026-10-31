@@ -854,6 +854,12 @@ def _status_poll_throttled(pr_id: str) -> bool:
         for key, ts in list(_STATUS_POLL_LAST_CHECK.items()):
             if ts < cutoff:
                 del _STATUS_POLL_LAST_CHECK[key]
+        # Coderabbit PR#17: within a burst window every entry is younger
+        # than the TTL, so the prune above never fires and the dict grows
+        # per distinct provider_request_id. Evict oldest beyond the cap.
+        while len(_STATUS_POLL_LAST_CHECK) > _STATUS_POLL_MAX_KEYS:
+            oldest = min(_STATUS_POLL_LAST_CHECK, key=_STATUS_POLL_LAST_CHECK.get)
+            del _STATUS_POLL_LAST_CHECK[oldest]
     return False
 
 
