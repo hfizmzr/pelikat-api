@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 def _is_valid_uuid(value) -> bool:
     if not isinstance(value, str):
         return False
+    # PostgreSQL uuid input has no colon form, but Python's UUID() strips
+    # urn:/uuid: prefixes — those would surface later as 22P02 -> 500.
+    if ':' in value:
+        return False
     try:
         uuid_lib.UUID(value)
     except (ValueError, AttributeError):

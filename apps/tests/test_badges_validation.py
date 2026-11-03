@@ -31,7 +31,8 @@ class TestBadgeEvaluateValidation:
 
     def test_non_uuid_string_variants_return_400(self, api_client, internal_api_key):
         """Blank, empty and malformed ids must all be rejected."""
-        for bad in ['', '   ', 'test-runner', '12345', None]:
+        for bad in ['', '   ', 'test-runner', '12345', None,
+                    'urn:uuid:00000000-0000-0000-0000-000000000001']:
             response = api_client.post(
                 '/ai/badges/evaluate',
                 data={'runner_id': bad},

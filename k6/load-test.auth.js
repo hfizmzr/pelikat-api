@@ -30,18 +30,19 @@ function readApiKey() {
   try {
     const envFile = open('../.env');
     const lines = envFile.split('\n');
+    // Skip comments and non-key lines, then keep the FULL value after the
+    // key (`slice`, not `split('=')`) so `=`-padded values survive intact.
     for (const line of lines) {
       const trimmed = line.trim();
-      if (trimmed.startsWith('INTERNAL_API_KEY=')) {
-        return trimmed.split('=', 2)[1].replace(/^["']|["']$/g, '');
-      }
+      if (trimmed.startsWith('#') || !trimmed.startsWith('INTERNAL_API_KEY=')) continue;
+      return trimmed.slice('INTERNAL_API_KEY='.length).replace(/^["']|["']$/g, '');
     }
   } catch (_) {
     // .env file not found or unreadable
   }
 
   console.warn('ERROR: INTERNAL_API_KEY not set. Pass it via:');
-  console.warn('  INTERNAL_API_KEY=$(grep INTERNAL_API_KEY .env | cut -d= -f2) k6 run k6/load-test.auth.js');
+  console.warn('  INTERNAL_API_KEY=$(grep INTERNAL_API_KEY .env | cut -d= -f2-) k6 run k6/load-test.auth.js');
   return '';
 }
 
@@ -58,6 +59,7 @@ export const options = {
   thresholds: {
     http_req_duration: [`p(95)<${__ENV.K6_P95_MS || 500}`], // 95% of requests < 500ms
     http_req_failed: [`rate<${__ENV.K6_ERROR_RATE || 0.01}`], // Error rate < 1%
+    checks: ['rate>0.99'], // Fail the run when check pass rate drops below 99%
   },
 };
 
