@@ -88,10 +88,11 @@ export default function () {
     'POST verify echoes runner_id': (r) => r.status === 200 && r.json('runner_id') === 'k6-runner',
   });
 
-  // ── Test 2: badge evaluation (DB read + compute) ──
+  // runner_id must be a UUID (run_logs.runner_id is a uuid column; the API
+  // rejects non-UUID ids with 400). Fixed zero UUID = no run logs = no badges.
   const evalRes = http.post(
     `${BASE_URL}/ai/badges/evaluate`,
-    JSON.stringify({ runner_id: 'k6-runner' }),
+    JSON.stringify({ runner_id: '00000000-0000-0000-0000-000000000001' }),
     { headers: HEADERS, tags: { name: 'POST /ai/badges/evaluate' } }
   );
   check(evalRes, {

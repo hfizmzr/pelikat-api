@@ -124,10 +124,11 @@ export default function () {
     'POST e-cert duration < 500ms': (r) => r.timings.duration < 500,
   });
 
-  // Test 6: POST /ai/badges/evaluate (DB read + compute)
+  // Test 6: POST /ai/badges/evaluate (DB read + compute; runner_id must be
+  // a UUID — run_logs.runner_id is a uuid column, API 400s malformed ids)
   const res6 = http.post(
     `${BASE_URL}/ai/badges/evaluate`,
-    JSON.stringify({ runner_id: 'test-runner' }),
+    JSON.stringify({ runner_id: '00000000-0000-0000-0000-000000000001' }),
     { headers: HEADERS }
   );
   check(res6, {
