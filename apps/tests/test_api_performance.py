@@ -97,7 +97,7 @@ class TestApiPerformance:
             start = time.perf_counter()
             response = api_client.post(
                 '/ai/badges/evaluate',
-                data={'runner_id': 'runner-uuid'},
+                data={'runner_id': '00000000-0000-0000-0000-000000000000'},
                 content_type='application/json',
                 **internal_api_key
             )

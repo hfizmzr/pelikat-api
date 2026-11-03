@@ -3,7 +3,6 @@ QR Signing Security Tests (NFR: JWT validated on every request, HMAC-SHA256 sign
 """
 import base64
 import json
-import time
 
 import pytest
 
@@ -14,6 +13,7 @@ from apps.qr_security.services import sign_qr, verify_qr
 class TestQrSigning:
     """Verify QR signing and verification security."""
 
+    @pytest.mark.smoke
     def test_sign_qr_returns_base64_string(self):
         """sign_qr returns a base64-encoded string with signature."""
         token = sign_qr('runner-123', 'event-456', 'B001')
@@ -30,6 +30,7 @@ class TestQrSigning:
         assert payload['bib_number'] == 'B001'
         assert 'ts' in payload
 
+    @pytest.mark.smoke
     def test_verify_qr_valid_token(self):
         """verify_qr returns valid=True for a correctly signed token."""
         token = sign_qr('runner-123', 'event-456', 'B001')
@@ -40,6 +41,7 @@ class TestQrSigning:
         assert result['event_id'] == 'event-456'
         assert result['bib_number'] == 'B001'
 
+    @pytest.mark.smoke
     def test_verify_qr_invalid_signature(self):
         """verify_qr returns valid=False for tampered signature."""
         token = sign_qr('runner-123', 'event-456', 'B001')
@@ -68,12 +70,15 @@ class TestQrSigning:
         assert result['valid'] is False
         assert result['error'] == 'Invalid signature'
 
-    def test_replay_attack_protection(self):
+    def test_replay_attack_protection(self, monkeypatch):
         """Same payload signed twice should produce different signatures (due to ts)."""
+        # Deterministic distinct seconds: real sleep+raced int(time.time())
+        # occasionally straddles the same second and produces equal tokens.
+        clock = iter([1_000_000, 1_000_005])
+        monkeypatch.setattr('apps.qr_security.services.time.time', lambda: next(clock))
         token1 = sign_qr('runner-123', 'event-456', 'B001')
-        time.sleep(1.1)  # Ensure different timestamp (integer seconds)
         token2 = sign_qr('runner-123', 'event-456', 'B001')
-        
+
         assert token1 != token2, "Tokens with same payload but different timestamps should differ"
         
         # Both should be valid

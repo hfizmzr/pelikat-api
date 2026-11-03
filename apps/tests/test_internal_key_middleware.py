@@ -8,6 +8,7 @@ import pytest
 class TestInternalKeyMiddleware:
     """Verify that all /ai/* endpoints require X-Internal-Key header."""
 
+    @pytest.mark.smoke
     def test_missing_key_returns_401(self, api_client):
         """Request without X-Internal-Key header returns 401."""
         response = api_client.post(
@@ -18,6 +19,7 @@ class TestInternalKeyMiddleware:
         assert response.status_code == 401
         assert response.json()['error'] == 'Unauthorized'
 
+    @pytest.mark.smoke
     def test_wrong_key_returns_401(self, api_client):
         """Request with wrong X-Internal-Key header returns 401."""
         response = api_client.post(
@@ -40,6 +42,7 @@ class TestInternalKeyMiddleware:
         )
         assert response.status_code == 401
 
+    @pytest.mark.smoke
     def test_correct_key_allows_access(self, api_client, internal_api_key):
         """Request with correct X-Internal-Key header passes through."""
         response = api_client.post(

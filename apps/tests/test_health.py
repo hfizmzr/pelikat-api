@@ -18,6 +18,7 @@ class TestHealth:
         # In a real implementation, a health endpoint would be added
         assert response.status_code in [200, 404]
     
+    @pytest.mark.smoke
     def test_badge_definitions_always_available(self, api_client, internal_api_key):
         """Badge definitions endpoint is a stateless endpoint that should always be available."""
         response = api_client.get('/ai/badges/definitions', **internal_api_key)
@@ -28,6 +29,7 @@ class TestHealth:
         assert isinstance(data['badges'], list)
         assert len(data['badges']) > 0
         
+    @pytest.mark.smoke
     def test_qr_verify_stateless(self, api_client, internal_api_key):
         """QR verify is a stateless endpoint that should always be available."""
         response = api_client.post(
