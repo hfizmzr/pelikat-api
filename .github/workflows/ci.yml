@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' # matches Dockerfile
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test (coverage gate via pytest.ini addopts)
+        # No .env in CI: settings boot only requires INTERNAL_API_KEY
+        # (everything else has safe defaults; conftest.py injects test values).
+        env:
+          INTERNAL_API_KEY: ci-dummy-internal-key
+        run: pytest --cov=apps --cov-report=term-missing
