@@ -44,6 +44,20 @@ class TestBadgeEvaluateValidation:
             )
             assert response.status_code == 400, f"runner_id={bad!r} -> {response.status_code}"
 
+    def test_unhyphenated_32hex_uuid_runner_id_reaches_service(self, api_client, internal_api_key):
+        """PostgreSQL accepts the unhyphenated 32-hex form; it must not 400."""
+        with patch('apps.badges.views.evaluate_badges') as mock_evaluate:
+            mock_evaluate.return_value = {'awarded': []}
+            response = api_client.post(
+                '/ai/badges/evaluate',
+                data={'runner_id': '00000000000000000000000000000000'},
+                content_type='application/json',
+                **internal_api_key
+            )
+            assert response.status_code == 200
+            args = mock_evaluate.call_args[0]
+            assert args[0] == '00000000000000000000000000000000'
+
     def test_valid_uuid_runner_id_reaches_service(self, api_client, internal_api_key):
         """A valid UUID is not rejected and is passed through to the service."""
         with patch('apps.badges.views.evaluate_badges') as mock_evaluate:

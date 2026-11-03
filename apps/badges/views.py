@@ -12,12 +12,15 @@ from .services import evaluate_badges, get_badge_definitions
 
 logger = logging.getLogger(__name__)
 
-# PostgREST only accepts canonical 8-4-4-4-12 uuid literals. Python's
+# PostgreSQL (and thus PostgREST) accepts both the canonical hyphenated
+# 8-4-4-4-12 UUID layout and the unhyphenated 32-hex form. Python's
 # uuid.UUID() strips hyphens before parsing, so a value like
 # '0000000-10000-...' would pass a bare try/UUID gate yet still trigger
-# 22P02 (-> 500) downstream. Enforce the canonical layout directly.
+# 22P02 (-> 500) downstream. Accept exactly those two forms and reject
+# everything else (e.g. misplaced hyphens, urn:uuid: prefixes).
 _UUID_RE = re.compile(
-    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+    r'(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+    r'|[0-9a-fA-F]{32})'
 )
 
 
