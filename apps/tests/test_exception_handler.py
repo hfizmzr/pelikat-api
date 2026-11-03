@@ -6,12 +6,14 @@ handler crashed with AttributeError when DRF returns a LIST payload
 defeating the guarantee. Red-first coverage for the list-payload branch.
 """
 
+import pytest
 from rest_framework.exceptions import ValidationError
 
 from pelikat.exceptions import exception_handler
 
 
 class TestListPayload:
+    @pytest.mark.smoke
     def test_list_validation_errors_normalized_to_error_key(self):
         # DRF renders ValidationError(list) as a list payload — the handler
         # must wrap it as {"error": [...]}, not crash on .get("detail").

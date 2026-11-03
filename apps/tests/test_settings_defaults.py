@@ -16,6 +16,8 @@ def _load_fresh_settings(monkeypatch):
     return namespace
 
 
+# Smoke: the two most safety-critical settings defaults, boot-fail-closed + DEBUG off.
+@pytest.mark.smoke
 def test_debug_defaults_false_when_unset(monkeypatch):
     monkeypatch.delenv('DEBUG', raising=False)
     namespace = _load_fresh_settings(monkeypatch)
@@ -23,6 +25,7 @@ def test_debug_defaults_false_when_unset(monkeypatch):
 
 
 # INTERNAL_API_KEY (M-fix): production must refuse to boot without it.
+@pytest.mark.smoke
 def test_missing_internal_key_raises_when_debug_false(monkeypatch):
     monkeypatch.delenv('INTERNAL_API_KEY', raising=False)
     monkeypatch.delenv('DEBUG', raising=False)

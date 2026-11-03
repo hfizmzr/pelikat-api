@@ -13,6 +13,7 @@ from apps.ecert.services import generate_cert
 class TestIdempotency:
     """Verify that key operations are idempotent."""
 
+    @pytest.mark.smoke
     def test_badge_evaluate_idempotent(self):
         """Calling evaluate_badges twice with same runner_id should not duplicate badges."""
         with patch('apps.badges.services.get_sb') as mock_get_sb:
