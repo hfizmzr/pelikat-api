@@ -32,7 +32,10 @@ class TestBadgeEvaluateValidation:
     def test_non_uuid_string_variants_return_400(self, api_client, internal_api_key):
         """Blank, empty and malformed ids must all be rejected."""
         for bad in ['', '   ', 'test-runner', '12345', None,
-                    'urn:uuid:00000000-0000-0000-0000-000000000001']:
+                    'urn:uuid:00000000-0000-0000-0000-000000000001',
+                    # Parses after hyphen stripping (0010 + 24 zeros) but is
+                    # not canonical 8-4-4-4-12 -> PostgREST would 22P02/500.
+                    '0000000-10000-0000-0000-000000000000']:
             response = api_client.post(
                 '/ai/badges/evaluate',
                 data={'runner_id': bad},

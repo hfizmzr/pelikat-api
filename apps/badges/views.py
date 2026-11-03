@@ -3,7 +3,7 @@ Badge Views
 """
 
 import logging
-import uuid as uuid_lib
+import re
 
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -12,19 +12,17 @@ from .services import evaluate_badges, get_badge_definitions
 
 logger = logging.getLogger(__name__)
 
+# PostgREST only accepts canonical 8-4-4-4-12 uuid literals. Python's
+# uuid.UUID() strips hyphens before parsing, so a value like
+# '0000000-10000-...' would pass a bare try/UUID gate yet still trigger
+# 22P02 (-> 500) downstream. Enforce the canonical layout directly.
+_UUID_RE = re.compile(
+    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+)
+
 
 def _is_valid_uuid(value) -> bool:
-    if not isinstance(value, str):
-        return False
-    # PostgreSQL uuid input has no colon form, but Python's UUID() strips
-    # urn:/uuid: prefixes — those would surface later as 22P02 -> 500.
-    if ':' in value:
-        return False
-    try:
-        uuid_lib.UUID(value)
-    except (ValueError, AttributeError):
-        return False
-    return True
+    return isinstance(value, str) and bool(_UUID_RE.fullmatch(value))
 
 
 
