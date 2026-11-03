@@ -21,7 +21,11 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Lint
-        run: ruff check .
+        # requirements.txt ships no lint tooling; pin here to keep the gate
+        # frozen independent of dependency bumps.
+        run: |
+          pip install ruff==0.17.1
+          ruff check .
 
       - name: Test (coverage gate via pytest.ini addopts)
         # No .env in CI: settings boot only requires INTERNAL_API_KEY

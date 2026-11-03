@@ -7,10 +7,9 @@ for type uuid"), which escaped _gather_stats as an uncaught APIError and
 surfaced as a 500 "internal error" (seen with k6 placeholder ids like
 'k6-runner'). The view must reject non-UUID ids up-front with 400.
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-
 
 UUID = '00000000-0000-0000-0000-000000000001'
 
@@ -52,7 +51,7 @@ class TestBadgeEvaluateValidation:
                 **internal_api_key
             )
             assert response.status_code == 200
-            args, kwargs = mock_evaluate.call_args
+            args = mock_evaluate.call_args[0]
             assert args[0] == UUID
 
     def test_valid_uuid_with_event_id_reaches_service(self, api_client, internal_api_key):
@@ -66,6 +65,7 @@ class TestBadgeEvaluateValidation:
                 **internal_api_key
             )
             assert response.status_code == 400
+            assert 'event_id' in response.json().get('error', '')
 
             mock_evaluate.reset_mock()
             response = api_client.post(
@@ -75,5 +75,5 @@ class TestBadgeEvaluateValidation:
                 **internal_api_key
             )
             assert response.status_code == 200
-            args, kwargs = mock_evaluate.call_args
+            args = mock_evaluate.call_args[0]
             assert args[1] == '00000000-0000-0000-0000-000000000abc'

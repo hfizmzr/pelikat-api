@@ -17,7 +17,7 @@ import { check, sleep } from 'k6';
  *   K6_P95_MS=1500 k6 run k6/load-test.auth.js          # relax p95 threshold
  *
  * Auto-detection:
- *   - INTERNAL_API_KEY: auto-reads from ../../.env if not set via env var
+ *   - INTERNAL_API_KEY: auto-reads from ../.env if not set via env var
  *   - API_BASE_URL: defaults to http://localhost:8000
  */
 
