@@ -1,5 +1,7 @@
 import os
+import sys
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
@@ -51,7 +53,36 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'pelikat.wsgi.application'
 
-DATABASES = {}
+_database_url = os.environ.get('DATABASE_URL')
+if not _database_url:
+    # pytest-django probes DATABASES before conftest can set env, so under
+    # pytest fall back to a harmless dummy config (tests never touch the DB).
+    if 'pytest' in sys.modules:
+        DATABASES = {
+            'default': {
+                'ENGINE': 'django.db.backends.sqlite3',
+                'NAME': ':memory:',
+            },
+        }
+    else:
+        raise ImproperlyConfigured('DATABASE_URL must be set')
+else:
+    _url = urlparse(_database_url)
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': unquote(_url.path.lstrip('/')),
+            'USER': unquote(_url.username or ''),
+            'PASSWORD': unquote(_url.password or ''),
+            'HOST': _url.hostname or '',
+            'PORT': _url.port or '5432',
+            'OPTIONS': {'sslmode': os.environ.get('DB_SSLMODE') or 'require'},
+            'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE') or '60'),
+            'CONN_HEALTH_CHECKS': True,
+            'AUTOCOMMIT': True,
+        },
+    }
+    del _url
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [],
