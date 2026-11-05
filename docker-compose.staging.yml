@@ -1,6 +1,6 @@
 services:
   api:
-    image: ghcr.io/hfizmzr/pelikat-api:staging
+    image: docker.io/hfizmzr/pelikat-api:staging
     ports:
       - "8000:8000"
     depends_on:
@@ -21,7 +21,7 @@ services:
   # AI photo pipeline (FR-16): drains the photo_batch_items queue. Keep it
   # at one replica — see apps/ai_photos/management/commands/run_photo_worker.py.
   photo-worker:
-    image: ghcr.io/hfizmzr/pelikat-api:staging
+    image: docker.io/hfizmzr/pelikat-api:staging
     command: python manage.py run_photo_worker
     depends_on:
       migrate:
@@ -37,7 +37,7 @@ services:
     restart: unless-stopped
 
   migrate:
-    image: ghcr.io/hfizmzr/pelikat-api:staging
+    image: docker.io/hfizmzr/pelikat-api:staging
     command: python manage.py migrate --noinput
     env_file:
       - .env
