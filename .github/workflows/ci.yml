@@ -44,24 +44,35 @@ jobs:
         run: pytest --cov=apps --cov-report=term-missing
 
   docker:
+    # Images live on Docker Hub (hfizmzr/pelikat-api, public). :staging is a
+    # mutable tag that Portainer re-pulls on every webhook redeploy.
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
         uses: docker/login-action@v3
         with:
+          registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Skip Docker Hub login (secrets not set)
+        if: env.DOCKERHUB_USERNAME == '' || env.DOCKERHUB_TOKEN == ''
+        run: 'echo "skip: DOCKERHUB_USERNAME / DOCKERHUB_TOKEN secrets not set yet"'
+
       - name: Build and push image
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
         uses: docker/build-push-action@v6
         with:
           context: .

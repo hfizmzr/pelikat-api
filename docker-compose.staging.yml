@@ -1,3 +1,9 @@
+# Portainer stack env (Stack > Environment) is the single source of truth.
+# Every variable configured there is injected into compose as process env and
+# passes through via ${VAR} interpolation below. Do NOT add env_file: .env —
+# Git-managed stacks pull this file from GitHub where .env is gitignored, so
+# compose would crash resolving a missing /data/compose/4/.env.
+
 services:
   api:
     image: docker.io/hfizmzr/pelikat-api:staging
@@ -9,8 +15,24 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    env_file:
-      - .env
+    environment:
+      # Django core (settings.py)
+      - SECRET_KEY=${SECRET_KEY:-}
+      - DEBUG=${DEBUG:-0}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - HMAC_SECRET=${HMAC_SECRET:-}
+      # INTERNAL_API_KEY is required at boot — fail fast if Portainer env lacks it
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY not set in Portainer stack env}
+      # Supabase
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET:-}
+      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:-}
+      # HitPay (optional-empty; settings.py handles unset gracefully)
+      - HITPAY_API_URL=${HITPAY_API_URL:-}
+      - HITPAY_API_KEY=${HITPAY_API_KEY:-}
+      - HITPAY_WEBHOOK_SALT=${HITPAY_WEBHOOK_SALT:-}
+      - HITPAY_PAYMENT_METHODS=${HITPAY_PAYMENT_METHODS:-}
     restart: unless-stopped
     healthcheck:
       # Django has no route at "/" — any HTTP status (incl. 404) means the
@@ -36,13 +58,39 @@ services:
     environment:
       # show progress lines live in `docker logs` (stdout is block-buffered otherwise)
       - PYTHONUNBUFFERED=1
-    env_file:
-      - .env
+      # Same Portainer stack env passthrough as the api service (AI_PHOTOS_*
+      # tuning vars omitted — settings.py has safe defaults for them).
+      - SECRET_KEY=${SECRET_KEY:-}
+      - DEBUG=${DEBUG:-0}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - HMAC_SECRET=${HMAC_SECRET:-}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY not set in Portainer stack env}
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET:-}
+      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:-}
+      - HITPAY_API_URL=${HITPAY_API_URL:-}
+      - HITPAY_API_KEY=${HITPAY_API_KEY:-}
+      - HITPAY_WEBHOOK_SALT=${HITPAY_WEBHOOK_SALT:-}
+      - HITPAY_PAYMENT_METHODS=${HITPAY_PAYMENT_METHODS:-}
     restart: unless-stopped
 
   migrate:
     image: docker.io/hfizmzr/pelikat-api:staging
     command: python manage.py migrate --noinput
-    env_file:
-      - .env
+    environment:
+      # Same Portainer stack env passthrough as the api service.
+      - SECRET_KEY=${SECRET_KEY:-}
+      - DEBUG=${DEBUG:-0}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - HMAC_SECRET=${HMAC_SECRET:-}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY not set in Portainer stack env}
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET:-}
+      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:-}
+      - HITPAY_API_URL=${HITPAY_API_URL:-}
+      - HITPAY_API_KEY=${HITPAY_API_KEY:-}
+      - HITPAY_WEBHOOK_SALT=${HITPAY_WEBHOOK_SALT:-}
+      - HITPAY_PAYMENT_METHODS=${HITPAY_PAYMENT_METHODS:-}
     restart: "no"
