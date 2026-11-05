@@ -31,6 +31,8 @@ services:
       # Django core (settings.py)
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY not set in Portainer stack env}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL not set in Portainer stack env}
+      - DB_SSLMODE=${DB_SSLMODE:-require}
+      - DB_CONN_MAX_AGE=${DB_CONN_MAX_AGE:-60}
       - DEBUG=${DEBUG:-0}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
       - HMAC_SECRET=${HMAC_SECRET:?HMAC_SECRET not set in Portainer stack env}
@@ -87,6 +89,8 @@ services:
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
       - HMAC_SECRET=${HMAC_SECRET:?HMAC_SECRET not set in Portainer stack env}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL not set in Portainer stack env}
+      - DB_SSLMODE=${DB_SSLMODE:-require}
+      - DB_CONN_MAX_AGE=${DB_CONN_MAX_AGE:-60}
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY not set in Portainer stack env}
       - SUPABASE_URL=${SUPABASE_URL:-}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
@@ -111,6 +115,8 @@ services:
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
       - HMAC_SECRET=${HMAC_SECRET:?HMAC_SECRET not set in Portainer stack env}
       - DATABASE_URL=${DATABASE_URL:?DATABASE_URL not set in Portainer stack env}
+      - DB_SSLMODE=${DB_SSLMODE:-require}
+      - DB_CONN_MAX_AGE=${DB_CONN_MAX_AGE:-60}
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY not set in Portainer stack env}
       - SUPABASE_URL=${SUPABASE_URL:-}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
