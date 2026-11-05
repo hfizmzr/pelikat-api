@@ -1,10 +1,11 @@
-version: '3.8'
-
 services:
   api:
     image: ghcr.io/hfizmzr/pelikat-api:staging
     ports:
       - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     env_file:
       - .env
     restart: unless-stopped

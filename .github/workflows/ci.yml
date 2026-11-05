@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [master]
@@ -72,7 +75,7 @@ jobs:
     steps:
       - name: Redeploy Portainer staging stack
         if: env.WEBHOOK_URL != ''
-        run: curl --fail --silent --show-error --max-time 30 -X POST "$WEBHOOK_URL"
+        run: curl --fail -sS -o /dev/null --max-time 30 -X POST "$WEBHOOK_URL"
 
       - name: Skip webhook (secret not set)
         if: env.WEBHOOK_URL == ''
