@@ -126,4 +126,8 @@ services:
       - HITPAY_API_KEY=${HITPAY_API_KEY:-}
       - HITPAY_WEBHOOK_SALT=${HITPAY_WEBHOOK_SALT:-}
       - HITPAY_PAYMENT_METHODS=${HITPAY_PAYMENT_METHODS:-}
-    restart: on-failure
+    # Finite retries: absorb transient Supabase blips, but a permanent
+    # migration failure must be *reported* (finite attempts) instead of
+    # looping forever with api/photo-worker parked on
+    # service_completed_successfully.
+    restart: "on-failure:3"
