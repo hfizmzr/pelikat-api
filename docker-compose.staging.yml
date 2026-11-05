@@ -17,17 +17,17 @@ services:
         condition: service_completed_successfully
     environment:
       # Django core (settings.py)
-      - SECRET_KEY=${SECRET_KEY:-}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY not set in Portainer stack env}
       - DEBUG=${DEBUG:-0}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
-      - HMAC_SECRET=${HMAC_SECRET:-}
+      - HMAC_SECRET=${HMAC_SECRET:?HMAC_SECRET not set in Portainer stack env}
       # INTERNAL_API_KEY is required at boot — fail fast if Portainer env lacks it
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY not set in Portainer stack env}
       # Supabase
       - SUPABASE_URL=${SUPABASE_URL:-}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
       - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET:-}
-      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:-}
+      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:?DOCUMENT_ENCRYPTION_KEY not set in Portainer stack env}
       # HitPay (optional-empty; settings.py handles unset gracefully)
       - HITPAY_API_URL=${HITPAY_API_URL:-}
       - HITPAY_API_KEY=${HITPAY_API_KEY:-}
@@ -60,15 +60,15 @@ services:
       - PYTHONUNBUFFERED=1
       # Same Portainer stack env passthrough as the api service (AI_PHOTOS_*
       # tuning vars omitted — settings.py has safe defaults for them).
-      - SECRET_KEY=${SECRET_KEY:-}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY not set in Portainer stack env}
       - DEBUG=${DEBUG:-0}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
-      - HMAC_SECRET=${HMAC_SECRET:-}
+      - HMAC_SECRET=${HMAC_SECRET:?HMAC_SECRET not set in Portainer stack env}
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY not set in Portainer stack env}
       - SUPABASE_URL=${SUPABASE_URL:-}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
       - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET:-}
-      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:-}
+      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:?DOCUMENT_ENCRYPTION_KEY not set in Portainer stack env}
       - HITPAY_API_URL=${HITPAY_API_URL:-}
       - HITPAY_API_KEY=${HITPAY_API_KEY:-}
       - HITPAY_WEBHOOK_SALT=${HITPAY_WEBHOOK_SALT:-}
@@ -77,18 +77,21 @@ services:
 
   migrate:
     image: docker.io/hfizmzr/pelikat-api:staging
+    # Mutable :staging tag — same re-pull guarantee as api/photo-worker, so
+    # migrations never gate on a stale completed container from an old image.
+    pull_policy: always
     command: python manage.py migrate --noinput
     environment:
       # Same Portainer stack env passthrough as the api service.
-      - SECRET_KEY=${SECRET_KEY:-}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY not set in Portainer stack env}
       - DEBUG=${DEBUG:-0}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
-      - HMAC_SECRET=${HMAC_SECRET:-}
+      - HMAC_SECRET=${HMAC_SECRET:?HMAC_SECRET not set in Portainer stack env}
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY not set in Portainer stack env}
       - SUPABASE_URL=${SUPABASE_URL:-}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
       - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET:-}
-      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:-}
+      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:?DOCUMENT_ENCRYPTION_KEY not set in Portainer stack env}
       - HITPAY_API_URL=${HITPAY_API_URL:-}
       - HITPAY_API_KEY=${HITPAY_API_KEY:-}
       - HITPAY_WEBHOOK_SALT=${HITPAY_WEBHOOK_SALT:-}
