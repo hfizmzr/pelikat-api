@@ -1,0 +1,44 @@
+services:
+  api:
+    image: ghcr.io/hfizmzr/pelikat-api:staging
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      # Django has no route at "/" — any HTTP status (incl. 404) means the
+      # server is up; only connection failures mark the container unhealthy.
+      test: ["CMD-SHELL", "python -c \"import http.client; c = http.client.HTTPConnection('localhost', 8000, timeout=3); c.request('GET', '/'); c.getresponse().read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # AI photo pipeline (FR-16): drains the photo_batch_items queue. Keep it
+  # at one replica — see apps/ai_photos/management/commands/run_photo_worker.py.
+  photo-worker:
+    image: ghcr.io/hfizmzr/pelikat-api:staging
+    command: python manage.py run_photo_worker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # SIGTERM lets the worker finish its current photo; Docker's default is
+    # to SIGKILL after 10s, which could cut a slow photo off mid-write.
+    stop_grace_period: 2m
+    environment:
+      # show progress lines live in `docker logs` (stdout is block-buffered otherwise)
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  migrate:
+    image: ghcr.io/hfizmzr/pelikat-api:staging
+    command: python manage.py migrate --noinput
+    env_file:
+      - .env
+    restart: "no"
