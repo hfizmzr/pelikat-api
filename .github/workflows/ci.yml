@@ -3,6 +3,12 @@ name: CI
 permissions:
   contents: read
 
+# Serialize master CI runs: overlapping runs would race the mutable :staging
+# tag and double-fire the Portainer webhook. Queue them (no cancel) instead.
+concurrency:
+  group: staging-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     branches: [master]

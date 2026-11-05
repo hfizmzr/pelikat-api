@@ -1,6 +1,9 @@
 services:
   api:
     image: docker.io/hfizmzr/pelikat-api:staging
+    # Mutable :staging tag — always re-pull so webhook redeploys pick up a new
+    # image even when the git ref didn't change.
+    pull_policy: always
     ports:
       - "8000:8000"
     depends_on:
@@ -22,6 +25,7 @@ services:
   # at one replica — see apps/ai_photos/management/commands/run_photo_worker.py.
   photo-worker:
     image: docker.io/hfizmzr/pelikat-api:staging
+    pull_policy: always
     command: python manage.py run_photo_worker
     depends_on:
       migrate:
