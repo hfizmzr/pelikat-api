@@ -3,6 +3,13 @@ name: CI
 permissions:
   contents: read
 
+# Serialize master CI runs: cancel-in-progress: false is plain FIFO queueing,
+# not overwriting protection — the oldest run finishes first, then the newest
+# SHA's run pushes :staging and fires the Portainer webhook (newest image wins).
+concurrency:
+  group: staging-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     branches: [master]
@@ -38,12 +45,15 @@ jobs:
         run: pytest --cov=apps --cov-report=term-missing
 
   docker:
+    # Images live on Docker Hub (docker.io/hfizmzr/pelikat-api, public).
+    # :staging is a mutable tag that Portainer re-pulls on every webhook
+    # redeploy. Missing DOCKERHUB_* secrets fail the login step immediately
+    # and the deploy job (needs: docker) never fires — no skip-guard ceremony.
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -73,9 +83,6 @@ jobs:
       WEBHOOK_URL: ${{ secrets.PORTAINER_WEBHOOK_URL_API }}
     steps:
       - name: Redeploy Portainer staging stack
-        if: env.WEBHOOK_URL != ''
+        # Fail fast: a missing PORTAINER_WEBHOOK_URL_API secret makes this
+        # job red instead of silently skipping the staging redeploy.
         run: curl --fail -sS -o /dev/null --max-time 30 -X POST "$WEBHOOK_URL"
-
-      - name: Skip webhook (secret not set)
-        if: env.WEBHOOK_URL == ''
-        run: 'echo "skip: PORTAINER_WEBHOOK_URL_API secret not set yet"'

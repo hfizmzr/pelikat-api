@@ -1,13 +1,50 @@
+# Portainer stack env (Stack > Environment) is the single source of truth.
+# Every variable configured there is injected into compose as process env and
+# passes through via ${VAR} interpolation below. Do NOT add env_file: .env —
+# Git-managed stacks pull this file from GitHub where .env is gitignored, so
+# compose would crash resolving a missing /data/compose/4/.env.
+
 services:
   api:
     image: docker.io/hfizmzr/pelikat-api:staging
+    # Mutable :staging tag — always re-pull so webhook redeploys pick up a new
+    # image even when the git ref didn't change.
+    pull_policy: always
     ports:
       - "8000:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
-    env_file:
-      - .env
+    environment:
+      # AI_PHOTOS_* tuning values from Portainer. Unset values use the settings.py defaults.
+      # (views.py calls get_reader_options() on this service too.)
+      - AI_PHOTOS_YOLO_MODEL_PATH=${AI_PHOTOS_YOLO_MODEL_PATH:-}
+      - AI_PHOTOS_YOLO_CONF=${AI_PHOTOS_YOLO_CONF:-0.05}
+      - AI_PHOTOS_YOLO_IOU=${AI_PHOTOS_YOLO_IOU:-0.50}
+      - AI_PHOTOS_YOLO_MAX_DET=${AI_PHOTOS_YOLO_MAX_DET:-50}
+      - AI_PHOTOS_YOLO_IMGSZ=${AI_PHOTOS_YOLO_IMGSZ:-1280}
+      - AI_PHOTOS_OCR_CONF=${AI_PHOTOS_OCR_CONF:-0.50}
+      - AI_PHOTOS_UPSCALE_FACTOR=${AI_PHOTOS_UPSCALE_FACTOR:-3}
+      - AI_PHOTOS_CROP_PADDING_RATIO=${AI_PHOTOS_CROP_PADDING_RATIO:-0.04}
+      - AI_PHOTOS_AUTO_CONFIDENCE=${AI_PHOTOS_AUTO_CONFIDENCE:-0.85}
+      - AI_PHOTOS_REVIEW_CONFIDENCE=${AI_PHOTOS_REVIEW_CONFIDENCE:-0.50}
+      # Django core (settings.py)
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY not set in Portainer stack env}
+      - DEBUG=${DEBUG:-0}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - HMAC_SECRET=${HMAC_SECRET:?HMAC_SECRET not set in Portainer stack env}
+      # INTERNAL_API_KEY is required at boot — fail fast if Portainer env lacks it
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY not set in Portainer stack env}
+      # Supabase
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET:-}
+      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:?DOCUMENT_ENCRYPTION_KEY not set in Portainer stack env}
+      # HitPay (optional-empty; settings.py handles unset gracefully)
+      - HITPAY_API_URL=${HITPAY_API_URL:-}
+      - HITPAY_API_KEY=${HITPAY_API_KEY:-}
+      - HITPAY_WEBHOOK_SALT=${HITPAY_WEBHOOK_SALT:-}
+      - HITPAY_PAYMENT_METHODS=${HITPAY_PAYMENT_METHODS:-}
     restart: unless-stopped
     healthcheck:
       # Django has no route at "/" — any HTTP status (incl. 404) means the
@@ -22,6 +59,7 @@ services:
   # at one replica — see apps/ai_photos/management/commands/run_photo_worker.py.
   photo-worker:
     image: docker.io/hfizmzr/pelikat-api:staging
+    pull_policy: always
     command: python manage.py run_photo_worker
     depends_on:
       migrate:
@@ -32,13 +70,51 @@ services:
     environment:
       # show progress lines live in `docker logs` (stdout is block-buffered otherwise)
       - PYTHONUNBUFFERED=1
-    env_file:
-      - .env
+      # AI_PHOTOS_* tuning values from Portainer. Unset values use the settings.py defaults.
+      - AI_PHOTOS_YOLO_MODEL_PATH=${AI_PHOTOS_YOLO_MODEL_PATH:-}
+      - AI_PHOTOS_YOLO_CONF=${AI_PHOTOS_YOLO_CONF:-0.05}
+      - AI_PHOTOS_YOLO_IOU=${AI_PHOTOS_YOLO_IOU:-0.50}
+      - AI_PHOTOS_YOLO_MAX_DET=${AI_PHOTOS_YOLO_MAX_DET:-50}
+      - AI_PHOTOS_YOLO_IMGSZ=${AI_PHOTOS_YOLO_IMGSZ:-1280}
+      - AI_PHOTOS_OCR_CONF=${AI_PHOTOS_OCR_CONF:-0.50}
+      - AI_PHOTOS_UPSCALE_FACTOR=${AI_PHOTOS_UPSCALE_FACTOR:-3}
+      - AI_PHOTOS_CROP_PADDING_RATIO=${AI_PHOTOS_CROP_PADDING_RATIO:-0.04}
+      - AI_PHOTOS_AUTO_CONFIDENCE=${AI_PHOTOS_AUTO_CONFIDENCE:-0.85}
+      - AI_PHOTOS_REVIEW_CONFIDENCE=${AI_PHOTOS_REVIEW_CONFIDENCE:-0.50}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY not set in Portainer stack env}
+      - DEBUG=${DEBUG:-0}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - HMAC_SECRET=${HMAC_SECRET:?HMAC_SECRET not set in Portainer stack env}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY not set in Portainer stack env}
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET:-}
+      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:?DOCUMENT_ENCRYPTION_KEY not set in Portainer stack env}
+      - HITPAY_API_URL=${HITPAY_API_URL:-}
+      - HITPAY_API_KEY=${HITPAY_API_KEY:-}
+      - HITPAY_WEBHOOK_SALT=${HITPAY_WEBHOOK_SALT:-}
+      - HITPAY_PAYMENT_METHODS=${HITPAY_PAYMENT_METHODS:-}
     restart: unless-stopped
 
   migrate:
     image: docker.io/hfizmzr/pelikat-api:staging
+    # Mutable :staging tag — same re-pull guarantee as api/photo-worker, so
+    # migrations never gate on a stale completed container from an old image.
+    pull_policy: always
     command: python manage.py migrate --noinput
-    env_file:
-      - .env
+    environment:
+      # Same Portainer stack env passthrough as the api service.
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY not set in Portainer stack env}
+      - DEBUG=${DEBUG:-0}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - HMAC_SECRET=${HMAC_SECRET:?HMAC_SECRET not set in Portainer stack env}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY not set in Portainer stack env}
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET:-}
+      - DOCUMENT_ENCRYPTION_KEY=${DOCUMENT_ENCRYPTION_KEY:?DOCUMENT_ENCRYPTION_KEY not set in Portainer stack env}
+      - HITPAY_API_URL=${HITPAY_API_URL:-}
+      - HITPAY_API_KEY=${HITPAY_API_KEY:-}
+      - HITPAY_WEBHOOK_SALT=${HITPAY_WEBHOOK_SALT:-}
+      - HITPAY_PAYMENT_METHODS=${HITPAY_PAYMENT_METHODS:-}
     restart: "no"
