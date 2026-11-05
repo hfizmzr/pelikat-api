@@ -16,6 +16,18 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
+      # AI_PHOTOS_* tuning values from Portainer. Unset values use the settings.py defaults.
+      # (views.py calls get_reader_options() on this service too.)
+      - AI_PHOTOS_YOLO_MODEL_PATH=${AI_PHOTOS_YOLO_MODEL_PATH:-}
+      - AI_PHOTOS_YOLO_CONF=${AI_PHOTOS_YOLO_CONF:-0.05}
+      - AI_PHOTOS_YOLO_IOU=${AI_PHOTOS_YOLO_IOU:-0.50}
+      - AI_PHOTOS_YOLO_MAX_DET=${AI_PHOTOS_YOLO_MAX_DET:-50}
+      - AI_PHOTOS_YOLO_IMGSZ=${AI_PHOTOS_YOLO_IMGSZ:-1280}
+      - AI_PHOTOS_OCR_CONF=${AI_PHOTOS_OCR_CONF:-0.50}
+      - AI_PHOTOS_UPSCALE_FACTOR=${AI_PHOTOS_UPSCALE_FACTOR:-3}
+      - AI_PHOTOS_CROP_PADDING_RATIO=${AI_PHOTOS_CROP_PADDING_RATIO:-0.04}
+      - AI_PHOTOS_AUTO_CONFIDENCE=${AI_PHOTOS_AUTO_CONFIDENCE:-0.85}
+      - AI_PHOTOS_REVIEW_CONFIDENCE=${AI_PHOTOS_REVIEW_CONFIDENCE:-0.50}
       # Django core (settings.py)
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY not set in Portainer stack env}
       - DEBUG=${DEBUG:-0}
@@ -58,8 +70,17 @@ services:
     environment:
       # show progress lines live in `docker logs` (stdout is block-buffered otherwise)
       - PYTHONUNBUFFERED=1
-      # Same Portainer stack env passthrough as the api service (AI_PHOTOS_*
-      # tuning vars omitted — settings.py has safe defaults for them).
+      # AI_PHOTOS_* tuning values from Portainer. Unset values use the settings.py defaults.
+      - AI_PHOTOS_YOLO_MODEL_PATH=${AI_PHOTOS_YOLO_MODEL_PATH:-}
+      - AI_PHOTOS_YOLO_CONF=${AI_PHOTOS_YOLO_CONF:-0.05}
+      - AI_PHOTOS_YOLO_IOU=${AI_PHOTOS_YOLO_IOU:-0.50}
+      - AI_PHOTOS_YOLO_MAX_DET=${AI_PHOTOS_YOLO_MAX_DET:-50}
+      - AI_PHOTOS_YOLO_IMGSZ=${AI_PHOTOS_YOLO_IMGSZ:-1280}
+      - AI_PHOTOS_OCR_CONF=${AI_PHOTOS_OCR_CONF:-0.50}
+      - AI_PHOTOS_UPSCALE_FACTOR=${AI_PHOTOS_UPSCALE_FACTOR:-3}
+      - AI_PHOTOS_CROP_PADDING_RATIO=${AI_PHOTOS_CROP_PADDING_RATIO:-0.04}
+      - AI_PHOTOS_AUTO_CONFIDENCE=${AI_PHOTOS_AUTO_CONFIDENCE:-0.85}
+      - AI_PHOTOS_REVIEW_CONFIDENCE=${AI_PHOTOS_REVIEW_CONFIDENCE:-0.50}
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY not set in Portainer stack env}
       - DEBUG=${DEBUG:-0}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
