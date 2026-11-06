@@ -57,6 +57,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    networks:
+      - pelikat-shared
 
   # AI photo pipeline (FR-16): drains the photo_batch_items queue. Keep it
   # at one replica — see apps/ai_photos/management/commands/run_photo_worker.py.
@@ -131,3 +133,10 @@ services:
     # looping forever with api/photo-worker parked on
     # service_completed_successfully.
     restart: "on-failure:3"
+
+# External network shared with the web staging stack in Portainer
+# (create once on the host: docker network create pelikat-shared).
+networks:
+  pelikat-shared:
+    external: true
+    name: pelikat-shared
