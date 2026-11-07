@@ -85,4 +85,16 @@ jobs:
       - name: Redeploy Portainer staging stack
         # Fail fast: a missing PORTAINER_WEBHOOK_URL_API secret makes this
         # job red instead of silently skipping the staging redeploy.
-        run: curl --fail -sS -o /dev/null --max-time 30 -X POST "$WEBHOOK_URL"
+        # The webhook is reachable only via a flaky reverse-proxy VPS that
+        # drops ~50% of TCP connects; retry up to 5 attempts before failing
+        # (curl alone doesn't retry network errors without --retry-all-errors).
+        run: |
+          for i in 1 2 3 4 5; do
+            if curl --fail -sS -o /dev/null --connect-timeout 15 --max-time 60 -X POST "$WEBHOOK_URL"; then
+              exit 0
+            fi
+            echo "attempt $i failed (exit $?); retrying in 10s..."
+            sleep 10
+          done
+          echo "all 5 webhook attempts failed"
+          exit 1
