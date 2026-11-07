@@ -15,7 +15,12 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-change-this-in-produc
 # M5: default OFF — an unset DEBUG env var must not enable debug mode in prod.
 DEBUG = os.environ.get('DEBUG', 'False').lower() in ('1', 'true', 'yes')
 
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+# 'api' is the internal Docker hostname of this service in the staging stacks
+# (pelikat-web staging calls us at http://api:8000). It is appended after the
+# env passthrough so it survives both the unset case (compose default) and a
+# Portainer override that doesn't list it; a duplicate entry is harmless
+# because Django only does an exact-membership check.
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') + ['api']
 
 INSTALLED_APPS = [
     'django.contrib.contenttypes',
