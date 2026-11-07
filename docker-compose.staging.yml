@@ -34,7 +34,7 @@ services:
       - DB_SSLMODE=${DB_SSLMODE:-require}
       - DB_CONN_MAX_AGE=${DB_CONN_MAX_AGE:-60}
       - DEBUG=${DEBUG:-0}
-      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1,api}
       - HMAC_SECRET=${HMAC_SECRET:?HMAC_SECRET not set in Portainer stack env}
       # INTERNAL_API_KEY is required at boot — fail fast if Portainer env lacks it
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:?INTERNAL_API_KEY not set in Portainer stack env}
@@ -57,6 +57,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    networks:
+      - pelikat-shared
 
   # AI photo pipeline (FR-16): drains the photo_batch_items queue. Keep it
   # at one replica — see apps/ai_photos/management/commands/run_photo_worker.py.
@@ -131,3 +133,10 @@ services:
     # looping forever with api/photo-worker parked on
     # service_completed_successfully.
     restart: "on-failure:3"
+
+# External network shared with the web staging stack in Portainer
+# (create once on the host: docker network create pelikat-shared).
+networks:
+  pelikat-shared:
+    external: true
+    name: pelikat-shared

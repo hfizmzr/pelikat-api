@@ -53,3 +53,17 @@ def test_debug_enabled_by_explicit_env(monkeypatch):
     monkeypatch.setenv('DEBUG', '1')
     namespace = _load_fresh_settings(monkeypatch)
     assert namespace['DEBUG'] is True
+
+
+# 'api' must survive both the compose default (unset ALLOWED_HOSTS) and a
+# Portainer override that omits it — pelikat-web staging calls http://api:8000.
+def test_allowed_hosts_always_includes_api_with_env_override(monkeypatch):
+    monkeypatch.setenv('ALLOWED_HOSTS', 'staging.example.com')
+    namespace = _load_fresh_settings(monkeypatch)
+    assert namespace['ALLOWED_HOSTS'] == ['staging.example.com', 'api']
+
+
+def test_allowed_hosts_always_includes_api_when_unset(monkeypatch):
+    monkeypatch.delenv('ALLOWED_HOSTS', raising=False)
+    namespace = _load_fresh_settings(monkeypatch)
+    assert namespace['ALLOWED_HOSTS'] == ['localhost', '127.0.0.1', 'api']
