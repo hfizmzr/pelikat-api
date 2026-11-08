@@ -2,6 +2,10 @@
 
 > Django backend for the Pelikat platform: AI photo tagging, document encryption (IC/MRZ parsing), HMAC-signed QR security, e-cert generation, badge evaluation, and HitPay payment processing.
 
+> **Staging branch?** The `staging` branch runs the same pipeline on a
+> zero-AVX CPU runtime (ONNX Runtime + RapidOCR) for the constrained staging
+> VPS. See [STAGING_DIFFERENCES.md](STAGING_DIFFERENCES.md).
+
 ## Stack
 
 - Django 5
