@@ -99,7 +99,6 @@ REST_FRAMEWORK = {
 HMAC_SECRET = os.environ['HMAC_SECRET']           # random 32-byte hex string
 SUPABASE_URL = os.environ['SUPABASE_URL']
 SUPABASE_SERVICE_ROLE_KEY = os.environ['SUPABASE_SERVICE_ROLE_KEY']
-SUPABASE_JWT_SECRET = os.environ['SUPABASE_JWT_SECRET']
 
 # Internal API key (Next.js → Django calls must include this header)
 INTERNAL_API_KEY = os.environ['INTERNAL_API_KEY']
@@ -111,7 +110,6 @@ INTERNAL_API_KEY = os.environ['INTERNAL_API_KEY']
 HMAC_SECRET=your-random-32-byte-hex-string
 SUPABASE_URL=https://xxxx.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=eyJ...
-SUPABASE_JWT_SECRET=your-supabase-jwt-secret
 INTERNAL_API_KEY=a-random-shared-secret-for-nextjs-to-django
 DEBUG=True
 ALLOWED_HOSTS=localhost,127.0.0.1
@@ -478,7 +476,6 @@ INTERNAL_API_KEY=shared-secret-nextjs-uses-to-call-django
 
 SUPABASE_URL=https://xxxx.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=eyJ...
-SUPABASE_JWT_SECRET=your-supabase-jwt-secret
 ```
 
 ---
