@@ -32,12 +32,13 @@ def letterbox(image: np.ndarray, size: int):
     """
     img_h, img_w = image.shape[:2]
     scale = min(size / img_w, size / img_h)
-    new_w, new_h = int(round(img_w * scale)), int(round(img_h * scale))
+    new_w, new_h = round(img_w * scale), round(img_h * scale)
     resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
     dw, dh = size - new_w, size - new_h
-    left, right = int(round((dw - 0.1) / 2)), int(round((dw + 0.1) / 2))
-    top, bottom = int(round((dh - 0.1) / 2)), int(round((dh + 0.1) / 2))
+    # single-arg round() already returns int (Python 3); no int() cast needed
+    left, right = round((dw - 0.1) / 2), round((dw + 0.1) / 2)
+    top, bottom = round((dh - 0.1) / 2), round((dh + 0.1) / 2)
     top, bottom, left, right = max(top, 0), max(bottom, 0), max(left, 0), max(right, 0)
 
     padded = cv2.copyMakeBorder(resized, top, bottom, left, right,

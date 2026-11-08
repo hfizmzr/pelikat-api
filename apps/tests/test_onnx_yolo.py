@@ -123,7 +123,7 @@ class TestDecodeRoundtrip:
         assert [round(d["conf"], 3) for d in dets] == [0.9, 0.8]
 
     def test_empty_and_bad_shapes(self):
-        output, input_size = synth_output([(310, 360, 100, 160, 0.9)])
+        output, _ = synth_output([(310, 360, 100, 160, 0.9)])
         with pytest.raises(ValueError):
             decode_yolo_output(
                 output[0], NAMES, 1.0, 160, 80,
