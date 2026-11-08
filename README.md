@@ -64,7 +64,7 @@ Uses `pytest.ini` (settings module `pelikat.settings`). Test suites cover the AI
 
 All variable names/purposes (see `.env.example`; values are never committed):
 
-- `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` / `SUPABASE_JWT_SECRET` — Supabase connection and JWT verification.
+- `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` — Supabase connection.
 - `HMAC_SECRET` — HMAC signing of QR payloads.
 - `INTERNAL_API_KEY` — shared secret required on `/ai/*` and `/payments/*` requests (Next.js ↔ API).
 - `DOCUMENT_ENCRYPTION_KEY` — key for document encryption endpoints.

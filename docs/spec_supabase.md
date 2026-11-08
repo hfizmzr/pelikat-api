@@ -502,7 +502,6 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
 # Django (.env)
 SUPABASE_URL=https://xxxx.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=eyJ...   # Never expose this to frontend
-SUPABASE_JWT_SECRET=your-jwt-secret
 ```
 
 ---
