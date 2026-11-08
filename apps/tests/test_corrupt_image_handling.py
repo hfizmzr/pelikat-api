@@ -117,22 +117,18 @@ class TestCorruptImageHandling:
         buf = io.BytesIO()
         img.save(buf, format='PNG')
         image_bytes = buf.getvalue()
-        
-        # We mock the YOLO model to return zero detections
-        mock_result = MagicMock()
-        mock_result.boxes = []
-        
+
+        # We mock the ONNX detector to return zero detections
         with patch('apps.ai_photos.reader.get_yolo_model') as mock_yolo:
             mock_model = MagicMock()
-            mock_model.predict.return_value = [mock_result]
-            mock_model.names = {0: 'bib'}
+            mock_model.predict.return_value = []
             mock_yolo.return_value = mock_model
-            
+
             with patch('apps.ai_photos.reader.get_ocr_reader') as mock_ocr:
                 mock_ocr.return_value = MagicMock()
-                
+
                 result = read_bibs_from_bytes(image_bytes, source_name='empty.jpg')
-                
+
                 assert result['status'] == 'discarded'
                 assert result['bib_number'] is None
                 assert len(result['detections']) == 0

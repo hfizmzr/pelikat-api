@@ -1,7 +1,8 @@
 """
 AI Photo Processing Service
 
-Uses YOLO for bib detection and PaddleOCR for OCR on cropped regions.
+Uses the YOLO ONNX detector for bib detection and RapidOCR (PP-OCRv5
+mobile ONNX) for OCR on cropped regions.
 
 Batches are queued in photo_batches / photo_batch_items (migration 087)
 and processed one photo at a time by `manage.py run_photo_worker`, so no

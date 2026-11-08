@@ -7,6 +7,10 @@ python-dotenv>=1.0
 numpy>=1.24,<2.4
 Pillow>=10.0
 onnxruntime==1.20.1
+# Pinned: the PP-OCRv5 behaviour was validated on 3.3.1 (direct
+# model_path wiring, no downloads). Newer 3.x versions change bundled
+# defaults (3.10 bundles PP-OCRv6) and pre/post-processing details.
+rapidocr==3.3.1
 ultralytics>=8.0
 paddleocr>=3.0
 paddlepaddle==3.0.0

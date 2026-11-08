@@ -128,21 +128,33 @@ HITPAY_WEBHOOK_SALT = os.environ.get('HITPAY_WEBHOOK_SALT', '')
 # Dashboard's toggled-on rails govern (payment_methods omitted from payload).
 HITPAY_PAYMENT_METHODS = os.environ.get('HITPAY_PAYMENT_METHODS', '')
 
-_AI_PHOTOS_YOLO_MODEL_PATH = os.environ.get('AI_PHOTOS_YOLO_MODEL_PATH')
+_YOLO_MODEL_ENV = os.environ.get('AI_PHOTOS_YOLO_MODEL_PATH')
+# YOLO bib detector: Ultralytics-export ONNX (see models/best.onnx; the
+# .pt source is kept out of the runtime — ONNX Runtime needs no torch).
 AI_PHOTOS_YOLO_MODEL_PATH = str(
-    Path(_AI_PHOTOS_YOLO_MODEL_PATH)
-    if _AI_PHOTOS_YOLO_MODEL_PATH and Path(_AI_PHOTOS_YOLO_MODEL_PATH).is_absolute()
-    else BASE_DIR / (_AI_PHOTOS_YOLO_MODEL_PATH or 'models/best.pt')
+    Path(_YOLO_MODEL_ENV)
+    if _YOLO_MODEL_ENV and Path(_YOLO_MODEL_ENV).is_absolute()
+    else BASE_DIR / (_YOLO_MODEL_ENV or 'models/best.onnx')
 )
 AI_PHOTOS_YOLO_CONF = float(os.environ.get('AI_PHOTOS_YOLO_CONF', '0.05'))
 AI_PHOTOS_YOLO_IOU = float(os.environ.get('AI_PHOTOS_YOLO_IOU', '0.50'))
 AI_PHOTOS_YOLO_MAX_DET = int(os.environ.get('AI_PHOTOS_YOLO_MAX_DET', '50'))
+# Reference export size of the ONNX (letterbox uses the session's fixed
+# input shape); overrides can't resize a baked square export.
 AI_PHOTOS_YOLO_IMGSZ = int(os.environ.get('AI_PHOTOS_YOLO_IMGSZ', '1280'))
 AI_PHOTOS_OCR_CONF = float(os.environ.get('AI_PHOTOS_OCR_CONF', '0.50'))
-AI_PHOTOS_UPSCALE_FACTOR = int(os.environ.get('AI_PHOTOS_UPSCALE_FACTOR', '3'))
 AI_PHOTOS_CROP_PADDING_RATIO = float(os.environ.get('AI_PHOTOS_CROP_PADDING_RATIO', '0.04'))
 AI_PHOTOS_AUTO_CONFIDENCE = float(os.environ.get('AI_PHOTOS_AUTO_CONFIDENCE', '0.85'))
 AI_PHOTOS_REVIEW_CONFIDENCE = float(os.environ.get('AI_PHOTOS_REVIEW_CONFIDENCE', '0.50'))
+# RapidOCR PP-OCRv5 mobile ONNX models bundled in the repo (exact files the
+# old PaddleOCR path downloaded from Paddle's model zoo); absolute or
+# BASE_DIR-relative override supported.
+AI_PHOTOS_OCR_DET_MODEL = os.environ.get(
+    'AI_PHOTOS_OCR_DET_MODEL', str(BASE_DIR / 'models/rapidocr/ch_PP-OCRv5_mobile_det.onnx'))
+AI_PHOTOS_OCR_REC_MODEL = os.environ.get(
+    'AI_PHOTOS_OCR_REC_MODEL', str(BASE_DIR / 'models/rapidocr/latin_PP-OCRv5_rec_mobile.onnx'))
+AI_PHOTOS_OCR_REC_KEYS = os.environ.get(
+    'AI_PHOTOS_OCR_REC_KEYS', str(BASE_DIR / 'models/rapidocr/ppocrv5_latin_dict.txt'))
 
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'

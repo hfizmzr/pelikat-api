@@ -1,21 +1,13 @@
 """
 Documents HTTP API contract + security (Critical #3/#4/#7, Low #15).
 
-OCR is monkeypatched (no Paddle), Supabase storage mocked. Headless test:
+OCR is monkeypatched (no model files needed), Supabase storage mocked.
+Headless test:
     pytest apps/tests/test_documents_api.py
 """
 import json
-import sys
-import types
 from io import BytesIO
 from unittest.mock import MagicMock
-
-# Stub heavy optional deps absent from the test venv (ai_photos urlconf
-# import chain needs them at module level only).
-if "ultralytics" not in sys.modules:
-    _fake = types.ModuleType("ultralytics")
-    _fake.YOLO = lambda *a, **k: MagicMock()
-    sys.modules["ultralytics"] = _fake
 
 import pytest
 from django.core.cache import cache

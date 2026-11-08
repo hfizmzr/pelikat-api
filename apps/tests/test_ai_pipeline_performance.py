@@ -67,10 +67,9 @@ class TestAiPipelinePerformance:
     def test_reader_options_defaults(self):
         """Reader options have sensible defaults for performance."""
         opts = get_reader_options()
-        
+
         assert opts.yolo_conf == 0.05
         assert opts.yolo_imgsz == 1280
-        assert opts.upscale_factor == 3
         assert opts.yolo_max_det == 50  # Reasonable max detections per image
         
     def test_padded_crop_efficiency(self):

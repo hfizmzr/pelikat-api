@@ -2,8 +2,8 @@
 Background worker for the AI photo pipeline (FR-16).
 
 Drains photo_batch_items (migration 087) one photo at a time. Runs as its
-own process so the web workers never load YOLO / PaddleOCR or hold an
-HTTP request open while a batch is processed:
+own process so the web workers never load the ONNX YOLO/OCR engines or
+hold an HTTP request open while a batch is processed:
 
     python manage.py run_photo_worker          # long-running (docker compose `photo-worker`)
     python manage.py run_photo_worker --once   # drain the queue and exit
@@ -46,9 +46,9 @@ class Command(BaseCommand):
             f'photo worker: models loaded and warmed up in {time.monotonic() - started:.1f}s, waiting for photos'
         )
 
-        # After warm-up on purpose: Paddle installs its own OS-level SIGTERM
-        # handler that kills the process mid-photo. Registering ours last
-        # takes the signal back so a stop finishes the current photo first.
+        # After warm-up on purpose: the OCR engine used to install its own
+        # OS-level SIGTERM handler (Paddle). Registering ours last takes
+        # the signal back so a stop finishes the current photo first.
         signal.signal(signal.SIGTERM, request_stop)
         signal.signal(signal.SIGINT, request_stop)
 

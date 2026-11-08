@@ -1,36 +1,32 @@
 """
 Bib reader for AI photo tagging.
 
-Runs YOLO to locate bib regions, then PaddleOCR on each crop to read
-alphanumeric bib numbers. This module only returns read results; it does not
-write Supabase tags.
+Runs the YOLO ONNX export to locate bib regions, then RapidOCR
+(PP-OCRv5 mobile ONNX) on each crop to read alphanumeric bib numbers.
+This module only returns read results; it does not write Supabase tags.
 """
 
 import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
-
-# Paddle flags must be set before PaddleOCR imports Paddle internals.
-os.environ.setdefault("FLAGS_use_mkldnn", "0")
-os.environ.setdefault("FLAGS_use_onednn", "0")
-os.environ.setdefault("FLAGS_enable_pir_api", "0")
-os.environ.setdefault("FLAGS_use_pir_api", "0")
-os.environ.setdefault("FLAGS_allocator_strategy", "naive_best_fit")
-os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "1")
 
 import cv2
 import numpy as np
 from django.conf import settings
-from ultralytics import YOLO
 
-logger = logging.getLogger(__name__)
-logging.getLogger("ppocr").setLevel(logging.WARNING)
+from .onnx_yolo import OnnxDetector
 
 BIB_CLASS_KEYWORDS = ("bib", "number")
 NON_BIB_CLASS_KEYWORDS = ("runner", "person", "athlete")
 DEFAULT_BIB_REGEX = r"[A-Z]{0,4}\d{2,6}[A-Z]{0,4}"
+
+# RapidOCR's global image cap (px per side) — the old Paddle path had no
+# cap, so keep a generous bound instead of the 2000 default.
+OCR_MAX_SIDE_LEN = 6000
+
+logger = logging.getLogger(__name__)
+logging.getLogger("rapidocr").setLevel(logging.WARNING)
 
 _yolo_model = None
 _ocr_reader = None
@@ -43,7 +39,6 @@ class ReaderOptions:
     yolo_max_det: int = 50
     yolo_imgsz: int = 1280
     ocr_conf: float = 0.50
-    upscale_factor: int = 3
     crop_padding_ratio: float = 0.04
     auto_confidence: float = 0.85
     review_confidence: float = 0.50
@@ -56,7 +51,6 @@ def get_reader_options() -> ReaderOptions:
         yolo_max_det=int(getattr(settings, "AI_PHOTOS_YOLO_MAX_DET", 50)),
         yolo_imgsz=int(getattr(settings, "AI_PHOTOS_YOLO_IMGSZ", 1280)),
         ocr_conf=float(getattr(settings, "AI_PHOTOS_OCR_CONF", 0.50)),
-        upscale_factor=int(getattr(settings, "AI_PHOTOS_UPSCALE_FACTOR", 3)),
         crop_padding_ratio=float(getattr(settings, "AI_PHOTOS_CROP_PADDING_RATIO", 0.04)),
         auto_confidence=float(getattr(settings, "AI_PHOTOS_AUTO_CONFIDENCE", 0.85)),
         review_confidence=float(getattr(settings, "AI_PHOTOS_REVIEW_CONFIDENCE", 0.50)),
@@ -66,51 +60,98 @@ def get_reader_options() -> ReaderOptions:
 def get_yolo_model():
     global _yolo_model
     if _yolo_model is None:
-        model_path = getattr(settings, "AI_PHOTOS_YOLO_MODEL_PATH", "best.pt")
+        model_path = getattr(settings, "AI_PHOTOS_YOLO_MODEL_PATH", "models/best.onnx")
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"YOLO model not found: {model_path}")
-        _yolo_model = YOLO(model_path)
+            raise FileNotFoundError(f"YOLO ONNX model not found: {model_path}")
+        _yolo_model = OnnxDetector(model_path)
     return _yolo_model
+
+
+class RapidOcrEngine:
+    """
+    PaddleOCR-compatible wrapper over RapidOCR (PP-OCRv5 mobile det+rec
+    ONNX models, bundled in models/rapidocr/ — no runtime downloads).
+
+    ``ocr(image)`` returns one page dict shaped like PaddleOCR 3.x output
+    (``rec_texts`` / ``rec_scores`` / ``rec_polys``), which both
+    iter_ocr_lines() (bib crops) and apps/documents _iter_ocr_lines()
+    consume unchanged.
+    """
+
+    def __init__(
+        self,
+        det_model_path: str,
+        rec_model_path: str,
+        rec_keys_path: str,
+        intra_op_threads: int = 4,
+    ):
+        from rapidocr import RapidOCR
+        from rapidocr.utils.typings import LangRec, OCRVersion
+
+        self.engine = RapidOCR(params={
+            # The old pipeline disabled textline orientation; cls adds a
+            # third session we don't need for printed bib numbers.
+            "Global.use_cls": False,
+            "Global.max_side_len": OCR_MAX_SIDE_LEN,
+            "Det.ocr_version": OCRVersion.PPOCRV5,
+            "Det.model_path": str(det_model_path),
+            "Rec.ocr_version": OCRVersion.PPOCRV5,
+            "Rec.lang_type": LangRec.EN,
+            "Rec.model_path": str(rec_model_path),
+            "Rec.rec_keys_path": str(rec_keys_path),
+            "EngineConfig.onnxruntime.intra_op_num_threads": intra_op_threads,
+        })
+
+    def ocr(self, image: np.ndarray):
+        result = self.engine(image)
+        if result is None:
+            return []
+        boxes = result.boxes
+        if boxes is None or len(boxes) == 0:
+            return []
+        return [{
+            "rec_texts": list(result.txts or []),
+            "rec_scores": [float(score) for score in result.scores or []],
+            "rec_polys": [np.asarray(box) for box in boxes],
+        }]
 
 
 def get_ocr_reader():
     global _ocr_reader
     if _ocr_reader is None:
-        from paddleocr import PaddleOCR
-
-        _ocr_reader = PaddleOCR(
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
-            text_detection_model_name="PP-OCRv5_mobile_det",
-            text_recognition_model_name="en_PP-OCRv5_mobile_rec",
+        _ocr_reader = RapidOcrEngine(
+            settings.AI_PHOTOS_OCR_DET_MODEL,
+            settings.AI_PHOTOS_OCR_REC_MODEL,
+            settings.AI_PHOTOS_OCR_REC_KEYS,
         )
     return _ocr_reader
 
 
 def warm_up_models():
     """
-    Load both models and run each once on a blank image. The first real
-    inference otherwise pays PyTorch / Paddle start-up (~4-5 s on CPU), which
-    the first photo of a batch would feel.
+    Load both models and run each once. The first real inference otherwise
+    pays ONNX session start-up, which the first photo of a batch would feel.
     """
     options = get_reader_options()
-    blank = np.zeros((options.yolo_imgsz, options.yolo_imgsz, 3), dtype=np.uint8)
-    get_yolo_model().predict(
-        source=blank,
+    model = get_yolo_model()
+    model.predict(
+        np.zeros((model.imgsz, model.imgsz, 3), dtype=np.uint8),
         conf=options.yolo_conf,
-        imgsz=options.yolo_imgsz,
-        save=False,
-        verbose=False,
+        iou=options.yolo_iou,
+        max_det=options.yolo_max_det,
     )
-    get_ocr_reader().ocr(preprocess_for_ocr(blank[:64, :160], options.upscale_factor))
+
+    # OCR warm run on a crop containing digits so det *and* rec both load.
+    blank = np.full((64, 160, 3), 255, dtype=np.uint8)
+    cv2.putText(blank, "00", (8, 52), cv2.FONT_HERSHEY_SIMPLEX, 1.8, (0, 0, 0), 5)
+    get_ocr_reader().ocr(blank)
 
 
 def clamp(value: int, low: int, high: int) -> int:
     return max(low, min(value, high))
 
 
-def get_class_name(model: Any, class_id: int) -> str:
+def get_class_name(model: OnnxDetector, class_id: int) -> str:
     names = getattr(model, "names", None)
     if isinstance(names, dict):
         return str(names.get(class_id, class_id)).lower()
@@ -119,8 +160,7 @@ def get_class_name(model: Any, class_id: int) -> str:
     return str(class_id).lower()
 
 
-def is_bib_detection(model: Any, box: Any) -> bool:
-    class_id = int(box.cls[0]) if box.cls is not None else -1
+def is_bib_detection(model: OnnxDetector, class_id: int) -> bool:
     class_name = get_class_name(model, class_id)
 
     if any(word in class_name for word in NON_BIB_CLASS_KEYWORDS):
@@ -129,7 +169,7 @@ def is_bib_detection(model: Any, box: Any) -> bool:
     return any(word in class_name for word in BIB_CLASS_KEYWORDS)
 
 
-def padded_crop(image: np.ndarray, xyxy: Any, padding_ratio: float):
+def padded_crop(image: np.ndarray, xyxy, padding_ratio: float):
     img_h, img_w = image.shape[:2]
     x1, y1, x2, y2 = map(int, xyxy)
 
@@ -153,22 +193,21 @@ def padded_crop(image: np.ndarray, xyxy: Any, padding_ratio: float):
     return crop, (x1, y1, x2, y2)
 
 
-def preprocess_for_ocr(crop: np.ndarray, upscale_factor: int) -> np.ndarray:
-    upscaled = cv2.resize(
-        crop,
-        None,
-        fx=upscale_factor,
-        fy=upscale_factor,
-        interpolation=cv2.INTER_CUBIC,
-    )
-
-    gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
-
-    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+# RapidOCR's recognizer resizes each detected text line to 48px height;
+# when a glyph touches the crop edge, a 1px swing in the detector box
+# changes the resize grid enough to flip reads (parity evidence: bib5
+# "499" → "199" on a 98px vs 99px crop). Replicating a 1px border keeps
+# glyph pixels off the resize boundary, which restored stable reads on
+# the parity samples.
+OCR_CROP_BORDER = 1
 
 
-def ocr_box_height(points: Any) -> float:
+def paste_ocr_crop(crop: np.ndarray) -> np.ndarray:
+    return cv2.copyMakeBorder(crop, OCR_CROP_BORDER, OCR_CROP_BORDER, OCR_CROP_BORDER,
+                              OCR_CROP_BORDER, cv2.BORDER_REPLICATE)
+
+
+def ocr_box_height(points) -> float:
     if points is None or len(points) == 0:
         return 0.0
 
@@ -205,7 +244,7 @@ def build_bib_regex(bib_regex: str | None = None, bib_format: str | None = None)
     return re.compile(pattern, re.IGNORECASE)
 
 
-def iter_ocr_lines(ocr_result: Any):
+def iter_ocr_lines(ocr_result):
     if not ocr_result:
         return
 
@@ -224,9 +263,82 @@ def iter_ocr_lines(ocr_result: Any):
             yield line[0], str(line[1][0]), float(line[1][1])
 
 
-def extract_bib_number(ocr_result: Any, pattern: re.Pattern, min_conf: float):
+def _box_meta(points, text: str, conf: float) -> dict:
+    points = np.asarray(points, dtype=float)
+    return {
+        "points": points,
+        "text": text,
+        "conf": conf,
+        "min_x": float(points[:, 0].min()),
+        "max_x": float(points[:, 0].max()),
+        "min_y": float(points[:, 1].min()),
+        "max_y": float(points[:, 1].max()),
+    }
+
+
+def _pairs_like(left: dict, right: dict) -> bool:
+    """Two lines belong together when their vertical ranges overlap and
+    the right one starts within ~one text height of the left one."""
+    overlap = min(left["max_y"], right["max_y"]) - max(left["min_y"], right["min_y"])
+    heights = [left["max_y"] - left["min_y"], right["max_y"] - right["min_y"]]
+    smaller = min((h for h in heights if h > 0), default=0.0)
+    if smaller <= 0 or overlap / smaller < 0.5:
+        return False
+    gap = right["min_x"] - left["max_x"]
+    return -smaller < gap < smaller
+
+
+def merge_ocr_lines(lines):
+    """
+    Join OCR lines that sit side by side on one text row. RapidOCR's
+    PP-OCRv5 detector sometimes splits a single bib number ("5073") into
+    two lines ("507", "73") that the old Paddle pipeline read as one.
+    Merged lines are emitted alongside their parts, so nothing that was
+    readable before is lost.
+    """
+    boxes = [_box_meta(points, str(text), float(conf)) for points, text, conf in lines]
+    order = sorted(range(len(boxes)), key=lambda i: boxes[i]["min_x"])
+
+    groups: list[list[int]] = []
+    for i in order:
+        for group in groups:
+            if _pairs_like(boxes[group[-1]], boxes[i]):
+                group.append(i)
+                break
+        else:
+            groups.append([i])
+
+    out = []
+    # greedily built groups are disjoint, so emit each group's merged line
+    # and its member parts (merged first, so shorter parts can never
+    # outscore it within extract_bib_number's length-weighted ranking)
+    for group in groups:
+        members = [boxes[k] for k in group]
+        if len(members) == 1:
+            member = members[0]
+            out.append((member["points"], member["text"], member["conf"]))
+            continue
+
+        # group members were appended in x order, so the text concatenates
+        # left -> right
+        out.append((
+            np.array([
+                [min(m["min_x"] for m in members), min(m["min_y"] for m in members)],
+                [max(m["max_x"] for m in members), min(m["min_y"] for m in members)],
+                [max(m["max_x"] for m in members), max(m["max_y"] for m in members)],
+                [min(m["min_x"] for m in members), max(m["max_y"] for m in members)],
+            ]),
+            "".join(m["text"] for m in members),
+            min(m["conf"] for m in members),
+        ))
+        for member in members:
+            out.append((member["points"], member["text"], member["conf"]))
+    return out
+
+
+def extract_bib_number(ocr_result, pattern: re.Pattern, min_conf: float):
     candidates = []
-    for points, raw_text, confidence in iter_ocr_lines(ocr_result):
+    for points, raw_text, confidence in merge_ocr_lines(list(iter_ocr_lines(ocr_result))):
         if confidence < min_conf:
             continue
 
@@ -285,68 +397,76 @@ def read_bibs_from_image(
     source_name: str | None = None,
     bib_regex: str | None = None,
     bib_format: str | None = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     options = get_reader_options()
     model = get_yolo_model()
     ocr = get_ocr_reader()
     pattern = build_bib_regex(bib_regex=bib_regex, bib_format=bib_format)
 
-    results = model.predict(
-        source=image,
+    detections = []
+    for detected in model.predict(
+        image,
         conf=options.yolo_conf,
         iou=options.yolo_iou,
         max_det=options.yolo_max_det,
-        imgsz=options.yolo_imgsz,
-        save=False,
-        verbose=False,
-    )
+    ):
+        class_id = detected["class_id"]
+        class_name = get_class_name(model, class_id)
+        yolo_confidence = float(detected["conf"])
 
-    detections = []
-    for result in results:
-        for box in result.boxes:
-            class_id = int(box.cls[0]) if box.cls is not None else -1
-            class_name = get_class_name(model, class_id)
-            yolo_confidence = float(box.conf[0]) if box.conf is not None else 0.0
+        if not is_bib_detection(model, class_id):
+            continue
 
-            if not is_bib_detection(model, box):
-                continue
+        crop, crop_box = padded_crop(image, detected["xyxy"], options.crop_padding_ratio)
+        if crop is None:
+            continue
 
-            crop, crop_box = padded_crop(image, box.xyxy[0], options.crop_padding_ratio)
-            if crop is None:
-                continue
+        ocr_result = ocr.ocr(paste_ocr_crop(crop))
+        candidate = extract_bib_number(ocr_result, pattern, options.ocr_conf)
 
-            processed_crop = preprocess_for_ocr(crop, options.upscale_factor)
-            ocr_result = ocr.ocr(processed_crop)
-            candidate = extract_bib_number(ocr_result, pattern, options.ocr_conf)
+        detection = {
+            "box": list(crop_box),
+            "class_id": class_id,
+            "class_name": class_name,
+            "yolo_confidence": yolo_confidence,
+            "bib_number": None,
+            "ocr_confidence": 0.0,
+            "raw_text": None,
+            "status": "discarded",
+        }
+        if candidate:
+            detection.update(
+                {
+                    "bib_number": candidate["bib_number"],
+                    "ocr_confidence": candidate["ocr_confidence"],
+                    "raw_text": candidate["raw_text"],
+                    "normalized_text": candidate["normalized_text"],
+                    "extract_score": candidate["score"],
+                    "status": status_for_confidence(candidate["ocr_confidence"], options),
+                }
+            )
+        else:
+            detection["extract_score"] = 0.0
+        detections.append(detection)
 
-            detection = {
-                "box": list(crop_box),
-                "class_id": class_id,
-                "class_name": class_name,
-                "yolo_confidence": yolo_confidence,
-                "bib_number": None,
-                "ocr_confidence": 0.0,
-                "raw_text": None,
-                "status": "discarded",
-            }
-            if candidate:
-                detection.update(
-                    {
-                        "bib_number": candidate["bib_number"],
-                        "ocr_confidence": candidate["ocr_confidence"],
-                        "raw_text": candidate["raw_text"],
-                        "normalized_text": candidate["normalized_text"],
-                        "status": status_for_confidence(candidate["ocr_confidence"], options),
-                    }
-                )
-            detections.append(detection)
-
+    # Ranking decided on staging parity data (manager-approved): select by
+    # extract score (height + length + OCR-confidence composite from
+    # extract_bib_number), then OCR confidence, then YOLO confidence.
+    # Rationale: with RapidOCR, both bib4 reads saturate at OCR conf 1.0,
+    # so (ocr_conf, yolo_conf) alone flips the old outcome to the shorter
+    # "3004" misread; the extract score restores the deterministic old
+    # outcome (longer full-number "5073" wins). Single-read samples
+    # (bib5 "499") and no-read samples (bib2) are unaffected.
     best_detection = None
     readable = [item for item in detections if item["bib_number"]]
     if readable:
         best_detection = max(
             readable,
-            key=lambda item: (item["ocr_confidence"], item["yolo_confidence"]),
+            key=lambda item: (
+                item["extract_score"],
+                item["ocr_confidence"],
+                item["yolo_confidence"],
+            ),
         )
 
     height, width = image.shape[:2]
@@ -367,7 +487,7 @@ def read_bibs_from_bytes(
     source_name: str | None = None,
     bib_regex: str | None = None,
     bib_format: str | None = None,
-) -> dict[str, Any]:
+) -> dict:
     image = decode_image(image_bytes)
     return read_bibs_from_image(
         image,

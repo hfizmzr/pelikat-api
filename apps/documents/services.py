@@ -26,18 +26,8 @@ from datetime import UTC, datetime
 import cv2
 import numpy as np
 
-# ── Paddle FLAGS must be set before any Paddle/PaddleOCR import ──
-# Disable MKLDNN, OneDNN, and PIR API to force the legacy CPU inference
-# path that works with PaddlePaddle 3.0.0 on CPU (PP-OCRv5_mobile models).
-# OMP threads=1: the predictor intermittently raised std::exception on
-# subsequent calls under concurrent intra-op threads (E2E evidence);
-# single-worker sync OCR needs no parallelism.
-os.environ.setdefault("FLAGS_use_mkldnn", "0")
-os.environ.setdefault("FLAGS_use_onednn", "0")
-os.environ.setdefault("FLAGS_enable_pir_api", "0")
-os.environ.setdefault("FLAGS_use_pir_api", "0")
-os.environ.setdefault("FLAGS_allocator_strategy", "naive_best_fit")
-os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "1")
+# Threads=1 for this process' other lib backends (ONNX Runtime sessions set
+# their own intra-op thread counts; this only trims NumPy/OpenBLAS noise).
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 from cryptography.exceptions import InvalidTag
@@ -66,26 +56,24 @@ _KEYWORDS = [
 ]
 
 _ocr = None
-# All init/ocr access goes through one lock: Paddle predictors are not
-# thread-safe, and concurrent calls were a suspected std::exception source.
+# All init/ocr access goes through one lock: RapidOCR sessions share the
+# single global ONNX Runtime arena and concurrent full-page calls were a
+# suspected failure source under the old Paddle path as well.
 _ocr_lock = threading.Lock()
 
 
 def _build_ocr():
-    from paddleocr import PaddleOCR
-    kwargs = {
-        "use_doc_orientation_classify": False,
-        "use_doc_unwarping": False,
-        "use_textline_orientation": False,
-        "text_detection_model_name": "PP-OCRv5_mobile_det",
-        "text_recognition_model_name": "en_PP-OCRv5_mobile_rec",
-    }
-    try:
-        # Belt-and-braces MKLDNN off at the API level too (env flag above
-        # covers the C++ side). Older/newer builds may not accept the kwarg.
-        return PaddleOCR(enable_mkldnn=False, **kwargs)
-    except TypeError:
-        return PaddleOCR(**kwargs)
+    # One shared loader (apps/ai_photos.reader.RapidOcrEngine) builds the
+    # RapidOCR engine built from the same bundled PP-OCRv5 mobile models
+    # documents keeps its own instance to preserve the rebuild-on-crash
+    # singleton semantics below.
+    from apps.ai_photos.reader import RapidOcrEngine
+
+    return RapidOcrEngine(
+        settings.AI_PHOTOS_OCR_DET_MODEL,
+        settings.AI_PHOTOS_OCR_REC_MODEL,
+        settings.AI_PHOTOS_OCR_REC_KEYS,
+    )
 
 
 def _get_ocr():
@@ -96,16 +84,16 @@ def _get_ocr():
 
 
 def run_ocr(image):
-    """Run one ocr pass under the class lock. If the predictor throws
-    mid-run (Paddle std::exception → RuntimeError), drop the stale
-    singleton, rebuild once, and retry a single time inside this request.
+    """Run one ocr pass under the class lock. If the engine throws
+    mid-run (e.g. ONNX Runtime error), drop the stale singleton, rebuild
+    once, and retry a single time inside this request.
     A retry failure propagates to the caller's graceful-degrade path."""
     global _ocr
     with _ocr_lock:
         try:
             return _get_ocr().ocr(image)
         except Exception:
-            logger.exception("ocr.ocr() failed — reinitializing predictor once")
+            logger.exception("ocr engine call failed — reinitializing predictor once")
             _ocr = None
             return _get_ocr().ocr(image)
 
@@ -215,7 +203,8 @@ def assert_image_dimensions(data: bytes) -> None:
 
 
 def _iter_ocr_lines(ocr_result):
-    """Parse PaddleOCR 3.x results (handles both dict and legacy list formats)."""
+    """Parse engine page dicts ("rec_texts"/"rec_scores" — consumption
+    shape preserved from the PaddleOCR 3.x runtime)."""
     if not ocr_result:
         return
     for page in ocr_result:
@@ -257,7 +246,7 @@ def validate_document(file_bytes: bytes, *, dob: str | None = None,
     try:
         results = run_ocr(image)
     except Exception:
-        # Paddle runtime failure that survived the controlled re-init
+        # Engine failure that survived the controlled re-init
         # retry. Never propagate as a 500: the blob is accepted and
         # stored encrypted as usual, flagged for manual review. Deciding
         # note (PDPA/audit): the runner uploaded the image; holding the
