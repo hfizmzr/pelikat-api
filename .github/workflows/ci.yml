@@ -12,7 +12,7 @@ concurrency:
 
 on:
   push:
-    branches: [master]
+    branches: [master, staging] # both deploy the :staging image + Portainer webhook
   pull_request:
     branches: [master]
 
@@ -50,7 +50,7 @@ jobs:
     # redeploy. Missing DOCKERHUB_* secrets fail the login step immediately
     # and the deploy job (needs: docker) never fires — no skip-guard ceremony.
     needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/staging')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -77,7 +77,7 @@ jobs:
 
   deploy:
     needs: docker
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/staging')
     runs-on: ubuntu-latest
     env:
       WEBHOOK_URL: ${{ secrets.PORTAINER_WEBHOOK_URL_API }}
