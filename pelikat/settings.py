@@ -113,7 +113,6 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 HMAC_SECRET = os.environ.get('HMAC_SECRET', '')
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
-SUPABASE_JWT_SECRET = os.environ.get('SUPABASE_JWT_SECRET', '')
 # Fail-closed (Critical #5): an empty internal API key must never boot,
 # even under DEBUG — an empty key would make the middleware pass everyone.
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY', '')
