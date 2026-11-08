@@ -16,6 +16,11 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
+      # Thread caps: gunicorn workers + ONNX/numpy thread pools otherwise
+      # grab every core; 2 each keeps the 2-CPU budget sane.
+      - OMP_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
       # AI_PHOTOS_* tuning values from Portainer. Unset values use the settings.py defaults.
       # (views.py calls get_reader_options() on this service too.)
       - AI_PHOTOS_YOLO_MODEL_PATH=${AI_PHOTOS_YOLO_MODEL_PATH:-}
@@ -24,7 +29,6 @@ services:
       - AI_PHOTOS_YOLO_MAX_DET=${AI_PHOTOS_YOLO_MAX_DET:-50}
       - AI_PHOTOS_YOLO_IMGSZ=${AI_PHOTOS_YOLO_IMGSZ:-1280}
       - AI_PHOTOS_OCR_CONF=${AI_PHOTOS_OCR_CONF:-0.50}
-      - AI_PHOTOS_UPSCALE_FACTOR=${AI_PHOTOS_UPSCALE_FACTOR:-3}
       - AI_PHOTOS_CROP_PADDING_RATIO=${AI_PHOTOS_CROP_PADDING_RATIO:-0.04}
       - AI_PHOTOS_AUTO_CONFIDENCE=${AI_PHOTOS_AUTO_CONFIDENCE:-0.85}
       - AI_PHOTOS_REVIEW_CONFIDENCE=${AI_PHOTOS_REVIEW_CONFIDENCE:-0.50}
@@ -48,6 +52,12 @@ services:
       - HITPAY_WEBHOOK_SALT=${HITPAY_WEBHOOK_SALT:-}
       - HITPAY_PAYMENT_METHODS=${HITPAY_PAYMENT_METHODS:-}
     restart: unless-stopped
+    # Static cap: OCR validation on the API side is occasional but can spike.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '2'
     healthcheck:
       # Django has no route at "/" — any HTTP status (incl. 404) means the
       # server is up; only connection failures mark the container unhealthy.
@@ -71,9 +81,20 @@ services:
     # SIGTERM lets the worker finish its current photo; Docker's default is
     # to SIGKILL after 10s, which could cut a slow photo off mid-write.
     stop_grace_period: 2m
+    # Static 2-CPU/2GB cap for the batch OCR/detection worker.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '2'
     environment:
       # show progress lines live in `docker logs` (stdout is block-buffered otherwise)
       - PYTHONUNBUFFERED=1
+      # Thread caps: the worker holds the only ONNX inference sessions;
+      # 2 threads each keeps the 2-CPU budget sane.
+      - OMP_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
       # AI_PHOTOS_* tuning values from Portainer. Unset values use the settings.py defaults.
       - AI_PHOTOS_YOLO_MODEL_PATH=${AI_PHOTOS_YOLO_MODEL_PATH:-}
       - AI_PHOTOS_YOLO_CONF=${AI_PHOTOS_YOLO_CONF:-0.05}
@@ -81,7 +102,6 @@ services:
       - AI_PHOTOS_YOLO_MAX_DET=${AI_PHOTOS_YOLO_MAX_DET:-50}
       - AI_PHOTOS_YOLO_IMGSZ=${AI_PHOTOS_YOLO_IMGSZ:-1280}
       - AI_PHOTOS_OCR_CONF=${AI_PHOTOS_OCR_CONF:-0.50}
-      - AI_PHOTOS_UPSCALE_FACTOR=${AI_PHOTOS_UPSCALE_FACTOR:-3}
       - AI_PHOTOS_CROP_PADDING_RATIO=${AI_PHOTOS_CROP_PADDING_RATIO:-0.04}
       - AI_PHOTOS_AUTO_CONFIDENCE=${AI_PHOTOS_AUTO_CONFIDENCE:-0.85}
       - AI_PHOTOS_REVIEW_CONFIDENCE=${AI_PHOTOS_REVIEW_CONFIDENCE:-0.50}

@@ -41,6 +41,10 @@ services:
       - SECRET_KEY=dev-secret-key-do-not-use-in-production
       # show progress lines live in `docker logs` (stdout is block-buffered otherwise)
       - PYTHONUNBUFFERED=1
+      # same task caps as staging (see Dockerfile.dev thread-cap comment)
+      - OMP_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
     env_file:
       - .env
     volumes:

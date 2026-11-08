@@ -2,17 +2,18 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Same thread caps as Dockerfile.prod: keeps runtime behavior identical
+# between dev and staging for the OCR/detection services.
+ENV OMP_NUM_THREADS=2 \
+    OPENBLAS_NUM_THREADS=2 \
+    MKL_NUM_THREADS=2
+
 RUN apt-get update && apt-get install -y \
     libgl1 libglib2.0-0 libgomp1 \
     libfreetype6-dev fonts-dejavu \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-
-# CPU-only torch: ultralytics would otherwise pull the ~5GB CUDA wheel build
-# (container is CPU-only; GPU runs of YOLO happen on the host)
-RUN pip install --no-cache-dir torch torchvision \
-    --index-url https://download.pytorch.org/whl/cpu
 
 RUN pip install --no-cache-dir -r requirements.txt
 

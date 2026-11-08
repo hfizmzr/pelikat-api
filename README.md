@@ -7,7 +7,7 @@
 - Django 5
 - DRF (Django REST Framework)
 - Supabase (via supabase-py, psycopg2)
-- YOLOv8 (ultralytics) + PaddleOCR
+- YOLO bib detector on ONNX Runtime + RapidOCR (PP-OCRv5 mobile ONNX, bundled models)
 - Pillow
 - cryptography (document encryption)
 - HitPay payment gateway integration
@@ -69,7 +69,7 @@ All variable names/purposes (see `.env.example`; values are never committed):
 - `INTERNAL_API_KEY` — shared secret required on `/ai/*` and `/payments/*` requests (Next.js ↔ API).
 - `DOCUMENT_ENCRYPTION_KEY` — key for document encryption endpoints.
 - `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS` — standard Django settings.
-- `AI_PHOTOS_*` (YOLO/OCR model path, confidence, IoU, upscale, crop padding, auto/review confidence thresholds) — photo pipeline tuning.
+- `AI_PHOTOS_*` (YOLO/OCR model paths, confidence, IoU, crop padding, auto/review confidence thresholds) — photo pipeline tuning.
 - `HITPAY_API_URL`, `HITPAY_API_KEY`, `HITPAY_WEBHOOK_SALT`, `HITPAY_PAYMENT_METHODS` — HitPay payment gateway (sandbox vs production base URL, webhook salt).
 
 ## Endpoints
@@ -127,7 +127,7 @@ pelikat-api/
 │   ├── wsgi.py
 │   └── middleware.py        # Internal API key validation
 └── apps/
-    ├── ai_photos/           # YOLO + PaddleOCR photo pipeline
+    ├── ai_photos/           # YOLO (ONNX) + RapidOCR photo pipeline
     ├── documents/           # IC/document encryption, MRZ & NRIC parsers
     ├── qr_security/         # HMAC sign/verify + consent codes
     ├── ecert/               # E-cert generation
