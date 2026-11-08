@@ -31,4 +31,4 @@ RUN python manage.py collectstatic --noinput || true
 
 EXPOSE 8000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "4", "--timeout", "120", "pelikat.wsgi:application"]
+CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:8000 --workers 4 --timeout 120 --access-logfile - --error-logfile - --log-level ${LOG_LEVEL:-info} pelikat.wsgi:application"]

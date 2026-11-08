@@ -156,6 +156,42 @@ AI_PHOTOS_OCR_REC_MODEL = os.environ.get(
 AI_PHOTOS_OCR_REC_KEYS = os.environ.get(
     'AI_PHOTOS_OCR_REC_KEYS', str(BASE_DIR / 'models/rapidocr/ppocrv5_latin_dict.txt'))
 
+# Logging: console-first so `docker logs` shows everything, not just errors.
+# Level is env-mediated (Portainer) and defaults to INFO — DEBUG stays an
+# explicit opt-in (it is what turns on SQL query tracing, not the default).
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+LOGGING = {
+    'version': 1,
+    # Keep loggers other modules already tweaked (e.g. rapidocr in reader.py).
+    'disable_existing_loggers': False,
+    'formatters': {
+        'console': {
+            'format': '%(levelname)s %(asctime)s %(name)s %(message)s',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'stream': 'ext://sys.stdout',
+            'formatter': 'console',
+        },
+    },
+    # Root at LOG_LEVEL: app/service loggers (apps.* loggers.info/warning,
+    # pelikat.exceptions) stream to `docker logs` at the configured level.
+    'root': {'handlers': ['console'], 'level': LOG_LEVEL},
+    'loggers': {
+        # Request-path loggers at INFO (Django's default would gate them at
+        # WARNING): 400s/403s/404s and allowed_hosts-misses are visible even
+        # when gunicorn access logs would otherwise be the only per-request
+        # line. Values are never logged on these paths — no tokens/PII.
+        'django.request': {'level': 'INFO'},
+        'django.server': {'level': 'INFO', 'handlers': ['console'], 'propagate': False},
+        # SQL only shows at DEBUG (event level is DEBUG) — INFO is the ceiling
+        # for production visibility/query tracing.
+        'django.db.backends': {'level': 'INFO'},
+    },
+}
+
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
 USE_I18N = True

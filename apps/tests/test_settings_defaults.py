@@ -67,3 +67,18 @@ def test_allowed_hosts_always_includes_api_when_unset(monkeypatch):
     monkeypatch.delenv('ALLOWED_HOSTS', raising=False)
     namespace = _load_fresh_settings(monkeypatch)
     assert namespace['ALLOWED_HOSTS'] == ['localhost', '127.0.0.1', 'api']
+
+
+# Logging: staging streams root logs to console at an env-driven level —
+# default INFO (never DEBUG), DEBUG is an explicit Portainer opt-in.
+def test_log_level_defaults_to_info_with_console_handler(monkeypatch):
+    monkeypatch.delenv('LOG_LEVEL', raising=False)
+    namespace = _load_fresh_settings(monkeypatch)
+    assert namespace['LOG_LEVEL'] == 'INFO'
+    assert namespace['LOGGING']['root'] == {'handlers': ['console'], 'level': 'INFO'}
+
+
+def test_log_level_env_override_reaches_root_logger(monkeypatch):
+    monkeypatch.setenv('LOG_LEVEL', 'debug')
+    namespace = _load_fresh_settings(monkeypatch)
+    assert namespace['LOGGING']['root']['level'] == 'DEBUG'
