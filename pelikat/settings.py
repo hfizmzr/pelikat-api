@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from pathlib import Path
@@ -136,6 +137,22 @@ AI_PHOTOS_YOLO_MODEL_PATH = str(
     if _YOLO_MODEL_ENV and Path(_YOLO_MODEL_ENV).is_absolute()
     else BASE_DIR / (_YOLO_MODEL_ENV or 'models/best.onnx')
 )
+# Incident fallback (staging Portainer stale env): a stack env can still
+# carry the legacy heavy-runtime value .../best.pt, which ONNX Runtime
+# cannot parse (InvalidProtobuf crash-loop). Rather than require another
+# Portainer wipe, auto-correct ONLY the legacy default basename — a
+# deliberately custom .pt path (e.g. the master runtime with just best.pt
+# and no .onnx next to it) is left untouched because models/best.onnx
+# does not exist there; the is_file() guard keeps that configuration safe.
+_ONNX_MODEL_DEFAULT = BASE_DIR / 'models/best.onnx'
+if Path(AI_PHOTOS_YOLO_MODEL_PATH).name == 'best.pt' and _ONNX_MODEL_DEFAULT.is_file():
+    logging.getLogger(__name__).warning(
+        'AI_PHOTOS_YOLO_MODEL_PATH legacy value %s ignored — using ONNX '
+        'runtime model %s instead (.pt is the heavy-runtime format; the '
+        'staging image runs ONNX).',
+        AI_PHOTOS_YOLO_MODEL_PATH, _ONNX_MODEL_DEFAULT,
+    )
+    AI_PHOTOS_YOLO_MODEL_PATH = str(_ONNX_MODEL_DEFAULT)
 AI_PHOTOS_YOLO_CONF = float(os.environ.get('AI_PHOTOS_YOLO_CONF', '0.05'))
 AI_PHOTOS_YOLO_IOU = float(os.environ.get('AI_PHOTOS_YOLO_IOU', '0.50'))
 AI_PHOTOS_YOLO_MAX_DET = int(os.environ.get('AI_PHOTOS_YOLO_MAX_DET', '50'))

@@ -23,6 +23,8 @@ services:
       - MKL_NUM_THREADS=2
       # AI_PHOTOS_* tuning values from Portainer. Unset values use the settings.py defaults.
       # (views.py calls get_reader_options() on this service too.)
+      # Staging runtime expects models/best.onnx; a stale legacy best.pt
+      # value falls back automatically in settings.py.
       - AI_PHOTOS_YOLO_MODEL_PATH=${AI_PHOTOS_YOLO_MODEL_PATH:-}
       - AI_PHOTOS_YOLO_CONF=${AI_PHOTOS_YOLO_CONF:-0.05}
       - AI_PHOTOS_YOLO_IOU=${AI_PHOTOS_YOLO_IOU:-0.50}
@@ -105,6 +107,8 @@ services:
       - OPENBLAS_NUM_THREADS=2
       - MKL_NUM_THREADS=2
       # AI_PHOTOS_* tuning values from Portainer. Unset values use the settings.py defaults.
+      # Staging runtime expects models/best.onnx; a stale legacy best.pt
+      # value falls back automatically in settings.py.
       - AI_PHOTOS_YOLO_MODEL_PATH=${AI_PHOTOS_YOLO_MODEL_PATH:-}
       - AI_PHOTOS_YOLO_CONF=${AI_PHOTOS_YOLO_CONF:-0.05}
       - AI_PHOTOS_YOLO_IOU=${AI_PHOTOS_YOLO_IOU:-0.50}
