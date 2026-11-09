@@ -95,3 +95,49 @@ class TestConsentCode:
             
             # Verify insert was called twice
             assert mock_sb.return_value.table.return_value.insert.call_count == 2
+
+    def test_consent_code_expiry_24h_boundary(self, api_client, internal_api_key):
+        """NFR07: REPC consent codes expire after exactly 24 hours (boundary).
+
+        Source of truth: apps/qr_security/views.py:90 computes
+        ``expires_at = datetime.now(UTC) + timedelta(hours=24)`` and
+        views.py:92-95 marks previous unused codes ``is_used`` (single-use).
+        This repo has no server-side consumption comparison (expiry check
+        happens at the consumer), so with a frozen clock the boundary is
+        pinned against the endpoint's actual returned ``expires_at``: a code
+        generated at T expires at exactly T+24h — i.e. one moment before
+        T+24h it is not yet past expiry, at/after T+24h it is.
+        """
+        frozen = datetime(2026, 11, 10, 12, 0, 0, tzinfo=UTC)
+
+        with patch('apps.qr_security.views.datetime') as mock_dt:
+            mock_dt.now.return_value = frozen
+            with patch('apps.qr_security.views._supabase') as mock_sb:
+                mock_sb.return_value.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(
+                    data={'id': 'reg-uuid', 'organizer_id': 'org-uuid'}
+                )
+                mock_sb.return_value.table.return_value.insert.return_value.execute.return_value = MagicMock()
+
+                response = api_client.post(
+                    '/ai/qr/consent-code',
+                    data={'registration_id': 'reg-uuid'},
+                    content_type='application/json',
+                    **internal_api_key
+                )
+
+                assert response.status_code == 200
+                expires_at = datetime.fromisoformat(response.json()['expires_at'])
+
+        # The app computes exactly T+24h — no shorter or longer TTL.
+        assert expires_at == frozen + timedelta(hours=24)
+
+        # Not-expired edge: one moment before T+24h, still within the window.
+        assert frozen + timedelta(hours=24, microseconds=-1) < expires_at
+        # Expired edges: at exactly T+24h the window has elapsed; past it, expired.
+        assert frozen + timedelta(hours=24) >= expires_at
+        assert frozen + timedelta(hours=24, microseconds=1) > expires_at
+
+        # Single-use: generating a new code marks prior unused codes is_used=True.
+        mock_sb.return_value.table.return_value.update.assert_called_once_with(
+            {'is_used': True}
+        )
