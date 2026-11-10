@@ -39,7 +39,18 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.middleware.common.CommonMiddleware',
     'pelikat.middleware.InternalKeyMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+# Explicit NFR04 header pins (SecurityMiddleware sets nosniff/referrer only if
+# these are enabled; XFrameOptionsMiddleware adds X-Frame-Options).
+# XFO pinned to DENY (Django 4.0+ default; stricter than SAMEORIGIN, pointless
+# to loosen for a JSON API — no iframes expected).
+X_FRAME_OPTIONS = 'DENY'
+SECURE_CONTENT_TYPE_NOSNIFF = True
+REFERRER_POLICY = 'same-origin'
+# CSP + HSTS intentionally deferred: TLS terminates at the edge/infra, and this
+# is an API-only service (CSP/HSTS recorded as infra follow-up).
 
 ROOT_URLCONF = 'pelikat.urls'
 
