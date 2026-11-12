@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-62 — e-cert theme contract (legacy passthrough + 400 caps) (UC14).
+Layers: service + view contract tests. Tests: 31.
+
 E-Certificate Theme Contract Tests (P4 / spec §7)
 
 theme omitted/None => byte-identical legacy render path.

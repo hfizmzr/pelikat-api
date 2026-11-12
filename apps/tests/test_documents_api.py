@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-45, NFR05, NFR06 — documents/IC HTTP API contract + security.
+Layers: endpoint tests, OCR + Supabase storage mocked. Tests: 43.
+
 Documents HTTP API contract + security (Critical #3/#4/#7, Low #15).
 
 OCR is monkeypatched (no model files needed), Supabase storage mocked.
@@ -68,6 +70,8 @@ def ocr(monkeypatch):
 
 @pytest.mark.security
 class TestEncryptEndpoint:
+    """Document encrypt endpoint: params, auth, 400/401 contract."""
+
     def test_missing_params_400(self, store, ocr):
         r = Client().post("/ai/documents/encrypt", **_h())
         assert r.status_code == 400
@@ -178,6 +182,8 @@ class TestEncryptEndpoint:
 
 @pytest.mark.security
 class TestEncryptIcEndpoint:
+    """IC encrypt endpoint: NRIC validation, v2 envelope, review flag."""
+
     def _post(self, payload):
         return Client().post("/ai/documents/encrypt-ic", data=json.dumps(payload),
                              content_type="application/json", **_h())
@@ -232,6 +238,8 @@ class TestEncryptIcEndpoint:
 
 @pytest.mark.security
 class TestDeleteEndpoint:
+    """Blob delete endpoint: ownership enforced, IDOR rejected 403."""
+
     def test_delete_own_blob(self, store):
         path = f"{USER}/1738712345000.enc"
         store[path] = b"x"
@@ -274,6 +282,8 @@ class TestDeleteEndpoint:
 
 @pytest.mark.security
 class TestDecryptRouteDeleted:
+    """Decrypt route is gone (404) — plaintext never leaves the server."""
+
     def test_decrypt_route_gone(self):
         r = Client().post("/ai/documents/decrypt",
                           data=json.dumps({"encrypted_path": "x", "iv": "x", "tag": "x",
@@ -284,6 +294,8 @@ class TestDecryptRouteDeleted:
 
 @pytest.mark.security
 class TestThrottle:
+    """Per-user hourly encrypt throttle (10/h), isolated between users."""
+
     def test_scoped_throttle_blocks_after_10_per_hour(self, store, ocr):
         c = Client(HTTP_X_USER_ID=USER)
         statuses = []
@@ -366,6 +378,8 @@ class TestThrottleKeyGuard:
 
 @pytest.mark.security
 class TestMiddlewareFailClosed:
+    """Internal-key middleware fails closed (401 without key)."""
+
     def test_missing_header_401(self):
         r = Client().post("/ai/documents/encrypt", data={"user_id": USER})
         assert r.status_code == 401

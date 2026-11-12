@@ -1,4 +1,6 @@
-"""
+"""Covers: NFR09 — corrupt images skipped, worker continues (UC05).
+Layers: mocked pipeline reliability probes. Tests: 9.
+
 Corrupt Image Handling Reliability Tests (NFR: AI pipeline handles corrupt images gracefully)
 """
 import io

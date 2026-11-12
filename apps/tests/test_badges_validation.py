@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-61 — badge engine input validation (UC14).
+Layers: endpoint regression, PostgREST mocked. Tests: 5.
+
 Badge Evaluate Input-Validation Tests (regression: 22P02 -> 500)
 
 run_logs.runner_id / runner_badges.runner_id are UUID columns in Supabase.

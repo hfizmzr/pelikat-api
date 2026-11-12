@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-22 — unique BIB + embedded signed QR (UC06).
+Layers: HMAC-SHA256 tamper/replay unit. Tests: 9.
+
 QR Signing Security Tests (NFR: JWT validated on every request, HMAC-SHA256 signing)
 """
 import base64

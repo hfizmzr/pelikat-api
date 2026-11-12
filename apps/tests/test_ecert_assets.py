@@ -1,4 +1,7 @@
-"""Tests for the SSRF-allowlisted theme asset fetcher (spec §7, plan Task 2).
+"""Covers: FR-62 — e-cert SSRF-allowlisted theme asset fetcher (UC14).
+Layers: injected stream factory, no network. Tests: 36.
+
+Tests for the SSRF-allowlisted theme asset fetcher (spec §7, plan Task 2).
 
 No test here touches the network: the stream factory is injected, so
 httpx.stream is never reached and every vector is in-process.

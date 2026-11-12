@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-45, NFR06 — v2 crypto envelope, AAD binding, upload guardrails.
+Layers: service layer unit, storage/OCR mocked. Tests: 20.
+
 Documents service layer: v2 crypto envelope, AAD binding, upload guardrails.
 OCR + Supabase storage + Paddle are mocked; nothing touches the network.
 """
@@ -27,6 +29,8 @@ def mock_supabase(monkeypatch):
 
 @pytest.mark.security
 class TestV2Envelope:
+    """V2 crypto envelope: self-describing blob, AAD binding, purpose separation."""
+
     def test_encrypt_document_uploads_self_describing_blob(self, mock_supabase):
         sb, _store = mock_supabase
         result = services.encrypt_document(b"raw-bytes", USER)
@@ -72,6 +76,8 @@ class TestV2Envelope:
 
 @pytest.mark.security
 class TestUploadGuardrails:
+    """Upload guardrails: type sniffing, dimension caps, decompression bombs."""
+
     def test_jpeg_png_webp_sniffed(self):
         assert services.sniff_image_mime(b"\xff\xd8\xff" + b"\x00" * 40) == "image/jpeg"
         assert services.sniff_image_mime(b"\x89PNG\r\n\x1a\n" + b"\x00" * 40) == "image/png"
@@ -144,6 +150,8 @@ class TestUploadGuardrails:
 
 @pytest.mark.security
 class TestPathSafety:
+    """Storage path sanitization: safe/unsafe cases."""
+
     @pytest.mark.parametrize("path", [
         f"{USER}/1700000000000.enc",
         f"{USER}/{123}.enc",

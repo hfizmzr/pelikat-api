@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-17 — RapidOCR line merge + bib extraction.
+Layers: pure-function unit, no model files. Tests: 7.
+
 Unit tests for the RapidOCR line-merge and bib extraction path: RapidOCR's
 PP-OCRv5 detector splits single bib numbers ("5073" → "507" + "73") that
 the old Paddle pipeline read as one line — merge_ocr_lines recovers them.
@@ -25,6 +27,8 @@ PAGE_STACKED = [{"rec_texts": ["507", "32"], "rec_scores": [0.9, 0.9],
 
 
 class TestMergeOcrLines:
+    """Side-by-side OCR line merge (PP-OCRv5 bib splits); stacked lines kept apart."""
+
     def test_passes_single_line_through(self):
         out = merge_ocr_lines([(p, t, c) for p, t, c in
                                zip(PAGE_SINGLE[0]["rec_polys"], PAGE_SINGLE[0]["rec_texts"], PAGE_SINGLE[0]["rec_scores"])])
@@ -53,6 +57,8 @@ class TestMergeOcrLines:
 
 
 class TestExtractBibNumberMerges:
+    """Bib extraction recovers split digits; low-confidence lines skipped."""
+
     def test_split_digits_recover_full_number(self):
         candidate = extract_bib_number(PAGE_SPLIT, build_bib_regex(), 0.5)
         assert candidate["bib_number"] == "50773"

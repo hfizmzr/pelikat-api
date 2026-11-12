@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-01, NFR08 — organizer multi-tenancy, no schema changes.
+Layers: service unit, Supabase mocked. Tests: 5.
+
 Multi-tenant Scalability Tests (NFR: Support unlimited organizer tenants without schema changes)
 """
 from unittest.mock import MagicMock, patch

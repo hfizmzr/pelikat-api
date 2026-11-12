@@ -1,4 +1,6 @@
-"""
+"""Covers: NFR05 — internal key/JWT validated on every API request.
+Layers: middleware contract tests. Tests: 7.
+
 Internal Key Middleware Security Tests (NFR: JWT validated on every API request)
 """
 import pytest

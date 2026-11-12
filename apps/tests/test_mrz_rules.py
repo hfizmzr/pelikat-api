@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-45, NFR06 — ICAO 9303 TD3 MRZ parser + check digits.
+Layers: pure-function golden vectors (cross-validated reference impl). Tests: 26.
+
 ICAO 9303 TD3 MRZ parser + check-digit rules (apps/documents/mrz.py).
 
 Golden sample generated and cross-validated with a reference MRZ
@@ -16,6 +18,8 @@ SAMPLE = (
 
 @pytest.mark.security
 class TestCheckDigit:
+    """ICAO 9303 check-digit computation on known values."""
+
     @pytest.mark.parametrize("s,expected", [
         ("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "7"),
         ("0123456789", "7"),
@@ -32,6 +36,8 @@ class TestCheckDigit:
 
 @pytest.mark.security
 class TestParseTd3:
+    """TD3 parsing: golden sample, corruption detection, noisy fragments."""
+
     def test_golden_sample_parses_clean(self):
         r = parse_td3(SAMPLE)
         assert r is not None
@@ -83,6 +89,8 @@ class TestParseTd3:
 
 @pytest.mark.security
 class TestPassportNumberShape:
+    """Passport-number shape validation."""
+
     @pytest.mark.parametrize("n", ["A1234567", "AB12345", "123456789012345", "X0X0X"])
     def test_valid(self, n):
         assert passport_number_valid(n)

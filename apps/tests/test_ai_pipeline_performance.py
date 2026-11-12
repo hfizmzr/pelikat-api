@@ -1,4 +1,6 @@
-"""
+"""Covers: NFR02 — AI pipeline ≤ 30 s/photo (UC05 AI Photos).
+Layers: mocked pipeline timing + wall-clock 30 s ceiling test. Tests: 7.
+
 AI Pipeline Performance Tests (NFR: AI pipeline < 30s per photo on standard CPU)
 """
 import time

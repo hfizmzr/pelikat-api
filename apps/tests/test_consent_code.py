@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-28, NFR07 — consent codes single-use, 24h expiry (UC06/UC12).
+Layers: service unit tests incl. frozen-clock 24h boundary. Tests: 7.
+
 Consent Code Security Tests (NFR: Consent codes shall be single-use and time-limited)
 """
 import re

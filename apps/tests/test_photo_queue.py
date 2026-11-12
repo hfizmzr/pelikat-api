@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-16, FR-20 — photo pipeline enqueue/outcomes + batch stats (UC05).
+Layers: endpoint/service tests, Supabase mocked. Tests: 34.
+
 Background photo pipeline (FR-16) and batch stats (FR-20): enqueue views,
 per-photo outcomes, worker crash handling, paginated storage listing.
 """

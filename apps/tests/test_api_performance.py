@@ -1,4 +1,6 @@
-"""
+"""Covers: NFR01 — CRUD responses < 1 s under normal load.
+Layers: mocked-view latency probes. Tests: 6.
+
 API Performance Tests (NFR: CRUD responses < 500ms under normal load)
 """
 import time

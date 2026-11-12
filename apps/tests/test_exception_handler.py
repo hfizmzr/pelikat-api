@@ -1,4 +1,7 @@
-"""Regression tests for the global DRF exception handler (pelikat.exceptions).
+"""Covers: EXT (no census FR) — DRF global exception handler JSON-500 guarantee; adjacent NFR12 informative errors.
+Layers: handler unit tests, list/dict payloads. Tests: 4.
+
+Regression tests for the global DRF exception handler (pelikat.exceptions).
 
 PR #9 shipped the JSON-500 guarantee; the retroactive merge audit found the
 handler crashed with AttributeError when DRF returns a LIST payload
@@ -13,6 +16,8 @@ from pelikat.exceptions import exception_handler
 
 
 class TestListPayload:
+    """List payloads (array validation errors) normalize to a JSON error key."""
+
     @pytest.mark.smoke
     def test_list_validation_errors_normalized_to_error_key(self):
         # DRF renders ValidationError(list) as a list payload — the handler
@@ -30,6 +35,8 @@ class TestListPayload:
 
 
 class TestDictPayloadStillNormalized:
+    """Dict payloads keep detail→error normalization."""
+
     def test_detail_renamed_to_error(self):
         response = exception_handler(ValidationError({"detail": "nope"}), {})
         assert response is not None

@@ -1,4 +1,7 @@
-"""Settings defaults must be production-safe when the env var is unset (M5)."""
+"""Covers: EXT (no census FR) — production-safe settings defaults when env unset.
+Layers: settings-module unit tests. Tests: 14.
+
+Settings defaults must be production-safe when the env var is unset (M5)."""
 import logging
 from pathlib import Path
 

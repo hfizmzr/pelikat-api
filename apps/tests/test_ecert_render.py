@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-62 — e-cert themed A4 renderer, never-fail guarantee (UC14).
+Layers: render unit, in-memory PNG stubs, no network. Tests: 30.
+
 E-Certificate Themed Renderer Tests (P4 Task 3 / spec §7).
 
 Never-fail themed A4-landscape (3508x2480) renderer behind an SSRF-gated

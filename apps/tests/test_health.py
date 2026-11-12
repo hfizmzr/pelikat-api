@@ -1,4 +1,6 @@
-"""
+"""Covers: EXT (no census FR) — health/uptime availability probe.
+Layers: endpoint smoke. Tests: 3.
+
 Health / Availability Tests (NFR: 99.5% uptime target)
 """
 import pytest

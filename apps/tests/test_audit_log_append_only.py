@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-08 — audit log append-only (UC03 admin dashboard).
+Layers: source/URL-pattern pinning, no DB. Tests: 4.
+
 Audit Log Append-Only Reliability Tests (NFR: Audit log entries shall be append-only)
 """
 

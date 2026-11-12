@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-16 — YOLO bib-region decoder (letterbox → NMS → coords).
+Layers: synthetic-output unit, no model files. Tests: 6.
+
 Unit tests for the ONNX YOLO output decoder (letterbox → NMS →
 coord mapping) on synthetic (1, 4+nc, N) outputs. No model files needed.
 """
@@ -41,6 +43,8 @@ def decode(output, *, input_size=640, **kw):
 
 
 class TestLetterbox:
+    """Letterbox pads to square and scales to fit."""
+
     def test_pads_to_square_with_gray(self):
         img = np.full((480, 320, 3), 200, dtype=np.uint8)
         padded, info = letterbox(img, 640)
@@ -62,6 +66,8 @@ class TestLetterbox:
 
 
 class TestDecodeRoundtrip:
+    """Decoder roundtrip on synthetic YOLO outputs (NMS, order, bad shapes)."""
+
     def test_synthetic_8400_rows_roundtrip_and_nms(self):
         # Image 320x480 → scale 4/3 (upscale allowed, as in predict),
         # continuous pad_left (640-427)/2 ≈ 106.5, pad_top 0.

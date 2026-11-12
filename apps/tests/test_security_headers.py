@@ -1,4 +1,6 @@
-"""
+"""Covers: NFR04 — XFO + nosniff + referrer headers pinned in settings.
+Layers: settings pin via test client response. Tests: 1.
+
 Security Header Tests (NFR04: XFO + nosniff + referrer pinned in settings)
 """
 

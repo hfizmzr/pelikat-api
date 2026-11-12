@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-23–FR-27 (UC06 REPC check-in, UC07 proxy collection), NFR07.
+Layers: SQL text pins + endpoint tests. Tests: 15.
+
 REPC / QR check-in & proxy collection tests (FR-23..27).
 
 Layering note (verified against the codebase, 2026-11-11):

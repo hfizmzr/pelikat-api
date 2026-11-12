@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-21 — reprocess keeps organizer confirmed/rejected decisions (UC05).
+Layers: migration-088 RPC arg/result contract, mocked. Tests: 5.
+
 Reprocessing keeps organizer decisions (confirmed / rejected tags).
 
 The keep / replace rules run inside replace_ai_photo_tags (migration 088,

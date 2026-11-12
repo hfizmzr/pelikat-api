@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-45, NFR06 — ICAO 9303 TD3 MRZ parser + check digits.
+Layers: pure-function golden vectors (cross-validated reference impl). Tests: 26.
+
 Canonical NRIC rule-set (apps/documents/nric.py) — pure function tests.
 """
 from datetime import date
@@ -18,6 +20,8 @@ VALID = "010101-14-5123"
 
 @pytest.mark.security
 class TestNricShape:
+    """NRIC prefix/suffix shape validation."""
+
     def test_valid_shape(self):
         assert validate_nric(VALID, today=TODAY)["valid"] is True
 
@@ -32,6 +36,8 @@ class TestNricShape:
 
 @pytest.mark.security
 class TestNricDate:
+    """Birth-date resolution: calendar validity, century convention, future dates."""
+
     def test_calendar_invalid_day(self):
         assert validate_nric("010229-14-5123", today=TODAY)["valid"] is False
         assert validate_nric("010231-14-5123", today=TODAY)["valid"] is False
@@ -65,6 +71,8 @@ class TestNricDate:
 
 @pytest.mark.security
 class TestNricStateCode:
+    """NRIC state-code prefix validation."""
+
     @pytest.mark.parametrize("state", ["01", "05", "10", "16", "21", "58", "59", "60", "90", "99"])
     def test_valid_state_prefixes(self, state):
         r = validate_nric(f"010101-{state}-5123", today=TODAY)
@@ -78,6 +86,8 @@ class TestNricStateCode:
 
 @pytest.mark.security
 class TestNricSerialAndCrossChecks:
+    """All-zero serial rejection + DOB/gender cross-checks."""
+
     def test_all_zero_serial_rejected(self):
         assert validate_nric("010101-14-0000", today=TODAY)["valid"] is False
 
@@ -102,6 +112,8 @@ class TestNricSerialAndCrossChecks:
 
 @pytest.mark.security
 class TestExtractFromOcrText:
+    """NRIC extraction from OCR text (dash/space forms)."""
+
     def test_dash_form(self):
         assert extract_nric_from_text("KAD PENGENALAN TAN 010101-14-5123 END") == VALID
 

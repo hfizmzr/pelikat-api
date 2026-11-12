@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-16–FR-19, NFR02, NFR09 — real ONNX pipeline integration.
+Layers: unmocked onnxruntime + RapidOCR on committed fixture photos. Tests: 6.
+
 REAL (non-mocked) ONNX photo-pipeline integration tests — FR-16..19, NFR02,
 NFR09.
 

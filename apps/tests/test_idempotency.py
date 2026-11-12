@@ -1,4 +1,6 @@
-"""
+"""Covers: NFR10 — collection/order transactions idempotent (UC06/UC16).
+Layers: service unit, PostgREST mocked. Tests: 4.
+
 Idempotency Reliability Tests (NFR: All collection and order transactions shall be idempotent)
 """
 from unittest.mock import MagicMock, patch

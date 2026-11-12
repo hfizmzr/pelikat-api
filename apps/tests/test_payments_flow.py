@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-71, FR-73, NFR05, NFR10 — HitPay create/status/refund/reconcile (UC16).
+Layers: endpoint tests, HitPay + Supabase mocked. Tests: 73.
+
 HitPay payments flow tests: create / status / refund / reconcile,
 plus internal-key middleware behaviour for the /payments/* surface.
 """
@@ -924,6 +926,8 @@ class TestSentinelRecovery:
 
 @pytest.mark.reliability
 class TestPaymentStatus:
+    """Payment status endpoint contract (fields, required ref, 404)."""
+
     def test_status_returns_fields(self, api_client):
         payments = _table([{'status': 'pending', 'payment_rail': None,
                             'provider_request_id': 'pr-9'}])
@@ -1170,6 +1174,8 @@ class TestStatusPollHitPayThrottle:
 
 @pytest.mark.reliability
 class TestRefund:
+    """Refund endpoint: rail gating, amounts, 404/409/502, claim release."""
+
     @classmethod
     def _completed_rows(cls, rail):
         return {
@@ -1316,6 +1322,8 @@ class TestRefund:
 
 @pytest.mark.reliability
 class TestReconcileCommand:
+    """Reconcile command: confirm/expired paths, poll errors, overlap guard."""
+
     def _stale_pending(self):
         return _table([{
             'provider_request_id': 'pr-9',
@@ -1382,6 +1390,8 @@ class TestReconcileCommand:
 
 @pytest.mark.reliability
 class TestReconcileMarkerRelease:
+    """Reconcile marker-release rules (completed vs manual disbursement)."""
+
     def _stale_pending(self):
         return _table([{
             'provider_request_id': 'pr-9',

@@ -1,4 +1,6 @@
-"""
+"""Covers: FR-71, NFR10 — webhook HMAC-SHA256 fail-closed verification.
+Layers: endpoint + signature normalization tests. Tests: 22.
+
 HitPay webhook signature security tests (NFR: only signature-verified
 webhook payloads may transition a payment to completed).
 
