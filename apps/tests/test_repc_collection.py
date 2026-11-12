@@ -33,9 +33,13 @@ import pytest
 
 from apps.qr_security.services import sign_qr
 
-# pelikat-api/apps/tests/test_repc_collection.py -> workspace root
-WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
-MIGRATIONS = WORKSPACE_ROOT / 'pelikat-web' / 'supabase' / 'migrations'
+# Vendored migrations: verbatim copies (sha-pinned at vendoring time,
+# 2026-11-12) of the pelikat-web/supabase/migrations files these pins read.
+# The test suite must stay self-contained because CI checks out ONLY this
+# repo (pelikat-web is a sibling workspace dir, absent on the runner). If a
+# pinned migration evolves upstream, refresh the vendored copy in the same
+# commit so these source-text pins keep tracking the live SQL.
+MIGRATIONS = Path(__file__).parent / 'fixtures' / 'migrations'
 
 
 def _migration(filename: str) -> str:
@@ -44,6 +48,7 @@ def _migration(filename: str) -> str:
     return path.read_text()
 
 
+# Vendored copies live in ./fixtures/migrations/ (see MIGRATIONS note below).
 M028 = '028_setup_repc_shirt_inventory_checkin.sql'
 M032 = '032_create_audit_triggers.sql'
 M037 = '037_fix_repc_check_in_ambiguous.sql'
