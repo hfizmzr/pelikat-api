@@ -2,20 +2,28 @@
 ONNX Runtime YOLO bib detector — AVX-free replacement for the ultralytics
 runtime (Paddle/PyTorch wheels are AVX-only; the staging CPU has none).
 
-Loads the Ultralytics-export best.onnx (fixed square input, raw
-(1, 4+nc, N) output: cx/cy/w/h boxes at input scale + class scores) and
-reproduces the same conf threshold → NMS → max_det behaviour as
+Loads an Ultralytics-export best.onnx (fixed square input) and reproduces
 ``YOLO.predict(source=..., conf=..., iou=..., max_det=..., imgsz=...)``.
+Two export layouts are understood, picked from the ``end2end`` metadata:
+
+- end2end (the committed model, YOLO26 default): (1, K, 6) NMS-free
+  one-to-one head output — conf threshold → max_det only. This is the
+  head ``best.pt`` predicts with, so detections match it exactly.
+- raw: (1, 4+nc, N) one-to-many head output — conf → NMS → max_det.
 """
 
 import ast
+import os
 
 import cv2
 import numpy as np
 import onnxruntime as ort
 
 LETTERBOX_PAD = (114, 114, 114)
-INTRA_OP_THREADS = 16
+# Match the container CPU cap (docker-compose.staging.yml: cpus '2'). More
+# intra-op threads than CPUs makes ORT spin-wait against the CFS quota: 16
+# threads on 2 CPUs measured ~10x slower per photo than 2 threads.
+INTRA_OP_THREADS = int(os.environ.get("AI_PHOTOS_ORT_THREADS", "2"))
 
 
 class OnnxModelError(Exception):
@@ -125,6 +133,44 @@ def decode_yolo_output(
     return detections
 
 
+def decode_end2end_output(
+    output: np.ndarray,
+    scale: float,
+    pad_left: float,
+    pad_top: float,
+    *,
+    conf_threshold: float,
+    max_det: int,
+) -> list[dict]:
+    """
+    Decode an NMS-free end2end export — (1, K, 6) rows of x1, y1, x2, y2,
+    conf, class_id in letterboxed input pixels, already sorted by conf.
+
+    YOLO26 checkpoints predict through their one-to-one head by default
+    (``model.end2end``), so this is the export that reproduces
+    ``YOLO('best.pt').predict`` — the raw one-to-many export is a different
+    head with different confidences.
+    """
+    if output.ndim != 3 or output.shape[0] != 1 or output.shape[2] != 6:
+        raise ValueError(f"expected (1, K, 6) end2end output, got shape {output.shape}")
+    rows = np.asarray(output, dtype=np.float32)[0]
+    rows = rows[rows[:, 4] >= conf_threshold]
+    rows = rows[np.argsort(-rows[:, 4], kind="stable")][:max_det]
+    return [
+        {
+            "xyxy": [
+                float((row[0] - pad_left) / scale),
+                float((row[1] - pad_top) / scale),
+                float((row[2] - pad_left) / scale),
+                float((row[3] - pad_top) / scale),
+            ],
+            "conf": float(row[4]),
+            "class_id": int(row[5]),
+        }
+        for row in rows
+    ]
+
+
 class OnnxDetector:
     """
     Minimal YOLO.predict-compatible wrapper over an Ultralytics ONNX
@@ -157,6 +203,7 @@ class OnnxDetector:
             }
         except KeyError as exc:
             raise OnnxModelError("export metadata missing 'names'") from exc
+        self.end2end = str(metadata.get("end2end", "False")).lower() == "true"
 
     def predict(
         self,
@@ -168,8 +215,15 @@ class OnnxDetector:
     ) -> list[dict]:
         """letterbox → session.run → decode, mapped to original coords."""
         letterboxed, (scale, pad_left, pad_top) = letterbox(image, self.imgsz)
-        blob = letterboxed.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+        # cv2 decodes BGR; Ultralytics models are trained on RGB and its own
+        # predict() flips channels before inference, so flip here too.
+        blob = letterboxed[..., ::-1].transpose(2, 0, 1)[None].astype(np.float32) / 255.0
         output = self.session.run(None, {self.input_name: blob})[0]
+        if self.end2end:
+            return decode_end2end_output(
+                output, scale, pad_left, pad_top,
+                conf_threshold=conf, max_det=max_det,
+            )
         return decode_yolo_output(
             output,
             self.names,

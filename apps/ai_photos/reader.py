@@ -25,6 +25,30 @@ DEFAULT_BIB_REGEX = r"[A-Z]{0,4}\d{2,6}[A-Z]{0,4}"
 # cap, so keep a generous bound instead of the 2000 default.
 OCR_MAX_SIDE_LEN = 6000
 
+# Text-detector settings PaddleOCR 3.x applies to PP-OCRv5_mobile_det (its
+# OCR pipeline config + the model's inference.yml). RapidOCR's own defaults
+# differ on every one of these (limit_side_len 736, box_thresh 0.5,
+# unclip 1.6, dilation on, 0.5/0.5 normalisation); with them the detector
+# fragments bib numbers ("90048" -> "004", "3297" -> "32") and reads the
+# "10KM" badge instead. Measured on 229 hand-labelled bib crops:
+# RapidOCR defaults 67 correct reads, these settings 203 (Paddle: 198).
+PADDLE_DET_PARAMS = {
+    "Det.limit_side_len": 64,
+    "Det.limit_type": "min",
+    "Det.thresh": 0.3,
+    "Det.box_thresh": 0.6,
+    "Det.unclip_ratio": 1.5,
+    "Det.use_dilation": False,
+    "Det.mean": [0.485, 0.456, 0.406],
+    "Det.std": [0.229, 0.224, 0.225],
+    # Paddle keeps every recognised line (callers apply their own conf
+    # floor) and has no small-image padding / aspect-ratio shortcut.
+    "Global.text_score": 0.0,
+    "Global.min_height": -1,
+    "Global.width_height_ratio": -1,
+}
+ORT_THREADS = int(os.environ.get("AI_PHOTOS_ORT_THREADS", "2"))
+
 logger = logging.getLogger(__name__)
 logging.getLogger("rapidocr").setLevel(logging.WARNING)
 
@@ -39,6 +63,7 @@ class ReaderOptions:
     yolo_max_det: int = 50
     yolo_imgsz: int = 1280
     ocr_conf: float = 0.50
+    upscale_factor: int = 3
     crop_padding_ratio: float = 0.04
     auto_confidence: float = 0.85
     review_confidence: float = 0.50
@@ -51,6 +76,7 @@ def get_reader_options() -> ReaderOptions:
         yolo_max_det=int(getattr(settings, "AI_PHOTOS_YOLO_MAX_DET", 50)),
         yolo_imgsz=int(getattr(settings, "AI_PHOTOS_YOLO_IMGSZ", 1280)),
         ocr_conf=float(getattr(settings, "AI_PHOTOS_OCR_CONF", 0.50)),
+        upscale_factor=int(getattr(settings, "AI_PHOTOS_UPSCALE_FACTOR", 3)),
         crop_padding_ratio=float(getattr(settings, "AI_PHOTOS_CROP_PADDING_RATIO", 0.04)),
         auto_confidence=float(getattr(settings, "AI_PHOTOS_AUTO_CONFIDENCE", 0.85)),
         review_confidence=float(getattr(settings, "AI_PHOTOS_REVIEW_CONFIDENCE", 0.50)),
@@ -83,7 +109,7 @@ class RapidOcrEngine:
         det_model_path: str,
         rec_model_path: str,
         rec_keys_path: str,
-        intra_op_threads: int = 4,
+        intra_op_threads: int = ORT_THREADS,
     ):
         from rapidocr import RapidOCR
         from rapidocr.utils.typings import LangRec, OCRVersion
@@ -93,6 +119,7 @@ class RapidOcrEngine:
             # third session we don't need for printed bib numbers.
             "Global.use_cls": False,
             "Global.max_side_len": OCR_MAX_SIDE_LEN,
+            **PADDLE_DET_PARAMS,
             "Det.ocr_version": OCRVersion.PPOCRV5,
             "Det.model_path": str(det_model_path),
             "Rec.ocr_version": OCRVersion.PPOCRV5,
@@ -193,18 +220,22 @@ def padded_crop(image: np.ndarray, xyxy, padding_ratio: float):
     return crop, (x1, y1, x2, y2)
 
 
-# RapidOCR's recognizer resizes each detected text line to 48px height;
-# when a glyph touches the crop edge, a 1px swing in the detector box
-# changes the resize grid enough to flip reads (parity evidence: bib5
-# "499" → "199" on a 98px vs 99px crop). Replicating a 1px border keeps
-# glyph pixels off the resize boundary, which restored stable reads on
-# the parity samples.
-OCR_CROP_BORDER = 1
+def preprocess_for_ocr(crop: np.ndarray, upscale_factor: int) -> np.ndarray:
+    """x3 cubic upscale + histogram equalisation (same as the Paddle path).
+    With Paddle-matched detector settings this is the best-scoring input on
+    the labelled crop set (203 correct vs 183 on the raw crop)."""
+    upscaled = cv2.resize(
+        crop,
+        None,
+        fx=upscale_factor,
+        fy=upscale_factor,
+        interpolation=cv2.INTER_CUBIC,
+    )
 
+    gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
+    gray = cv2.equalizeHist(gray)
 
-def paste_ocr_crop(crop: np.ndarray) -> np.ndarray:
-    return cv2.copyMakeBorder(crop, OCR_CROP_BORDER, OCR_CROP_BORDER, OCR_CROP_BORDER,
-                              OCR_CROP_BORDER, cv2.BORDER_REPLICATE)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
 
 def ocr_box_height(points) -> float:
@@ -263,82 +294,9 @@ def iter_ocr_lines(ocr_result):
             yield line[0], str(line[1][0]), float(line[1][1])
 
 
-def _box_meta(points, text: str, conf: float) -> dict:
-    points = np.asarray(points, dtype=float)
-    return {
-        "points": points,
-        "text": text,
-        "conf": conf,
-        "min_x": float(points[:, 0].min()),
-        "max_x": float(points[:, 0].max()),
-        "min_y": float(points[:, 1].min()),
-        "max_y": float(points[:, 1].max()),
-    }
-
-
-def _pairs_like(left: dict, right: dict) -> bool:
-    """Two lines belong together when their vertical ranges overlap and
-    the right one starts within ~one text height of the left one."""
-    overlap = min(left["max_y"], right["max_y"]) - max(left["min_y"], right["min_y"])
-    heights = [left["max_y"] - left["min_y"], right["max_y"] - right["min_y"]]
-    smaller = min((h for h in heights if h > 0), default=0.0)
-    if smaller <= 0 or overlap / smaller < 0.5:
-        return False
-    gap = right["min_x"] - left["max_x"]
-    return -smaller < gap < smaller
-
-
-def merge_ocr_lines(lines):
-    """
-    Join OCR lines that sit side by side on one text row. RapidOCR's
-    PP-OCRv5 detector sometimes splits a single bib number ("5073") into
-    two lines ("507", "73") that the old Paddle pipeline read as one.
-    Merged lines are emitted alongside their parts, so nothing that was
-    readable before is lost.
-    """
-    boxes = [_box_meta(points, str(text), float(conf)) for points, text, conf in lines]
-    order = sorted(range(len(boxes)), key=lambda i: boxes[i]["min_x"])
-
-    groups: list[list[int]] = []
-    for i in order:
-        for group in groups:
-            if _pairs_like(boxes[group[-1]], boxes[i]):
-                group.append(i)
-                break
-        else:
-            groups.append([i])
-
-    out = []
-    # greedily built groups are disjoint, so emit each group's merged line
-    # and its member parts (merged first, so shorter parts can never
-    # outscore it within extract_bib_number's length-weighted ranking)
-    for group in groups:
-        members = [boxes[k] for k in group]
-        if len(members) == 1:
-            member = members[0]
-            out.append((member["points"], member["text"], member["conf"]))
-            continue
-
-        # group members were appended in x order, so the text concatenates
-        # left -> right
-        out.append((
-            np.array([
-                [min(m["min_x"] for m in members), min(m["min_y"] for m in members)],
-                [max(m["max_x"] for m in members), min(m["min_y"] for m in members)],
-                [max(m["max_x"] for m in members), max(m["max_y"] for m in members)],
-                [min(m["min_x"] for m in members), max(m["max_y"] for m in members)],
-            ]),
-            "".join(m["text"] for m in members),
-            min(m["conf"] for m in members),
-        ))
-        for member in members:
-            out.append((member["points"], member["text"], member["conf"]))
-    return out
-
-
 def extract_bib_number(ocr_result, pattern: re.Pattern, min_conf: float):
     candidates = []
-    for points, raw_text, confidence in merge_ocr_lines(list(iter_ocr_lines(ocr_result))):
+    for points, raw_text, confidence in iter_ocr_lines(ocr_result):
         if confidence < min_conf:
             continue
 
@@ -421,7 +379,7 @@ def read_bibs_from_image(
         if crop is None:
             continue
 
-        ocr_result = ocr.ocr(paste_ocr_crop(crop))
+        ocr_result = ocr.ocr(preprocess_for_ocr(crop, options.upscale_factor))
         candidate = extract_bib_number(ocr_result, pattern, options.ocr_conf)
 
         detection = {
