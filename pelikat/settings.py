@@ -171,18 +171,22 @@ AI_PHOTOS_YOLO_MAX_DET = int(os.environ.get('AI_PHOTOS_YOLO_MAX_DET', '50'))
 # input shape); overrides can't resize a baked square export.
 AI_PHOTOS_YOLO_IMGSZ = int(os.environ.get('AI_PHOTOS_YOLO_IMGSZ', '1280'))
 AI_PHOTOS_OCR_CONF = float(os.environ.get('AI_PHOTOS_OCR_CONF', '0.50'))
+# Bib crops are upscaled + equalised before OCR (same as the Paddle path).
+AI_PHOTOS_UPSCALE_FACTOR = int(os.environ.get('AI_PHOTOS_UPSCALE_FACTOR', '3'))
 AI_PHOTOS_CROP_PADDING_RATIO = float(os.environ.get('AI_PHOTOS_CROP_PADDING_RATIO', '0.04'))
 AI_PHOTOS_AUTO_CONFIDENCE = float(os.environ.get('AI_PHOTOS_AUTO_CONFIDENCE', '0.85'))
 AI_PHOTOS_REVIEW_CONFIDENCE = float(os.environ.get('AI_PHOTOS_REVIEW_CONFIDENCE', '0.50'))
-# RapidOCR PP-OCRv5 mobile ONNX models bundled in the repo (exact files the
-# old PaddleOCR path downloaded from Paddle's model zoo); absolute or
-# BASE_DIR-relative override supported.
+# RapidOCR PP-OCRv5 mobile ONNX models bundled in the repo; absolute or
+# BASE_DIR-relative override supported. det = RapidOCR's conversion of
+# PP-OCRv5_mobile_det; rec = Paddle's own en_PP-OCRv5_mobile_rec (the model
+# the PaddleOCR path used), converted with paddle2onnx 2.1.0 — RapidOCR
+# ships no en PP-OCRv5 rec. The latin rec is kept as a fallback override.
 AI_PHOTOS_OCR_DET_MODEL = os.environ.get(
     'AI_PHOTOS_OCR_DET_MODEL', str(BASE_DIR / 'models/rapidocr/ch_PP-OCRv5_mobile_det.onnx'))
 AI_PHOTOS_OCR_REC_MODEL = os.environ.get(
-    'AI_PHOTOS_OCR_REC_MODEL', str(BASE_DIR / 'models/rapidocr/latin_PP-OCRv5_rec_mobile.onnx'))
+    'AI_PHOTOS_OCR_REC_MODEL', str(BASE_DIR / 'models/rapidocr/en_PP-OCRv5_mobile_rec.onnx'))
 AI_PHOTOS_OCR_REC_KEYS = os.environ.get(
-    'AI_PHOTOS_OCR_REC_KEYS', str(BASE_DIR / 'models/rapidocr/ppocrv5_latin_dict.txt'))
+    'AI_PHOTOS_OCR_REC_KEYS', str(BASE_DIR / 'models/rapidocr/ppocrv5_en_dict.txt'))
 
 # Logging: console-first so `docker logs` shows everything, not just errors.
 # Level is env-mediated (Portainer) and defaults to INFO — DEBUG stays an

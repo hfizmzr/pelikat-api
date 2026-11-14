@@ -1,5 +1,5 @@
 """Covers: FR-16 — YOLO bib-region decoder (letterbox → NMS → coords).
-Layers: synthetic-output unit, no model files. Tests: 6.
+Layers: synthetic-output unit + committed-model smoke. Tests: 10.
 
 Unit tests for the ONNX YOLO output decoder (letterbox → NMS →
 coord mapping) on synthetic (1, 4+nc, N) outputs. No model files needed.
@@ -8,7 +8,9 @@ import numpy as np
 import pytest
 
 from apps.ai_photos.onnx_yolo import (
+    OnnxDetector,
     OnnxModelError,
+    decode_end2end_output,
     decode_yolo_output,
     letterbox,
 )
@@ -147,3 +149,47 @@ class TestDecodeRoundtrip:
                 np.zeros((1, 6, 10), dtype=np.float32), NAMES, 1.0, 0, 0,
                 conf_threshold=0.05, iou_threshold=IOU, max_det=50,
             )
+
+
+class TestEnd2End:
+    """NMS-free (1, K, 6) export — what YOLO26 best.pt predicts with."""
+
+    def test_threshold_sort_maxdet_and_mapping(self):
+        rows = np.zeros((1, 300, 6), dtype=np.float32)
+        rows[0, 0] = [100, 120, 200, 220, 0.40, 0]
+        rows[0, 1] = [10, 20, 30, 40, 0.90, 0]
+        rows[0, 2] = [5, 5, 6, 6, 0.01, 0]  # below conf, dropped
+        out = decode_end2end_output(rows, 2.0, 10.0, 20.0, conf_threshold=0.05, max_det=50)
+        assert [d["conf"] for d in out] == pytest.approx([0.90, 0.40])
+        assert out[0]["xyxy"] == pytest.approx([0.0, 0.0, 10.0, 10.0])
+        assert out[1]["xyxy"] == pytest.approx([45.0, 50.0, 95.0, 100.0])
+        assert decode_end2end_output(rows, 1, 0, 0, conf_threshold=0.05, max_det=1)[0]["conf"] == pytest.approx(0.9)
+
+    def test_bad_shape(self):
+        with pytest.raises(ValueError):
+            decode_end2end_output(np.zeros((1, 5, 300), np.float32), 1, 0, 0, conf_threshold=0.05, max_det=5)
+
+    def test_committed_model_is_end2end(self):
+        from django.conf import settings
+        det = OnnxDetector(settings.AI_PHOTOS_YOLO_MODEL_PATH)
+        assert det.end2end is True
+        assert det.imgsz == 1280
+
+    def test_feeds_rgb(self, monkeypatch):
+        """cv2 gives BGR; the model must see RGB like ultralytics feeds it."""
+        from django.conf import settings
+        det = OnnxDetector(settings.AI_PHOTOS_YOLO_MODEL_PATH)
+        seen = {}
+
+        class FakeSession:
+            def run(self, _names, feeds):
+                seen["blob"] = next(iter(feeds.values()))
+                return [np.zeros((1, 300, 6), np.float32)]
+
+        monkeypatch.setattr(det, "session", FakeSession())
+        img = np.zeros((det.imgsz, det.imgsz, 3), np.uint8)
+        img[..., 0] = 255  # pure blue in BGR
+        assert det.predict(img) == []
+        blob = seen["blob"]
+        assert blob[0, 2].mean() == pytest.approx(1.0)  # blue lands in channel 2 (RGB)
+        assert blob[0, 0].mean() == pytest.approx(0.0)
