@@ -49,6 +49,21 @@ PADDLE_DET_PARAMS = {
 }
 ORT_THREADS = int(os.environ.get("AI_PHOTOS_ORT_THREADS", "2"))
 
+# RapidOCR 3.3.1's __call__ re-applies its own text_score / box_thresh /
+# unclip_ratio defaults (0.5 / 0.5 / 1.6) on EVERY call, overriding the
+# constructor params — so these must be passed per call to take effect.
+PER_CALL_PARAMS = {
+    "text_score": PADDLE_DET_PARAMS["Global.text_score"],
+    "box_thresh": PADDLE_DET_PARAMS["Det.box_thresh"],
+    "unclip_ratio": PADDLE_DET_PARAMS["Det.unclip_ratio"],
+}
+
+# Longest side (px) an OCR crop may reach after upscaling. Bib crops are
+# usually a few hundred px, so they keep the full x3; a huge box from a
+# large photo is upscaled less (or not at all) instead of allocating
+# gigabytes inside a 2 GB worker (a 6000x4000 crop at x3 is ~650 MB/array).
+OCR_UPSCALE_MAX_SIDE = 2000
+
 logger = logging.getLogger(__name__)
 logging.getLogger("rapidocr").setLevel(logging.WARNING)
 
@@ -130,7 +145,7 @@ class RapidOcrEngine:
         })
 
     def ocr(self, image: np.ndarray):
-        result = self.engine(image)
+        result = self.engine(image, **PER_CALL_PARAMS)
         if result is None:
             return []
         boxes = result.boxes
@@ -223,12 +238,17 @@ def padded_crop(image: np.ndarray, xyxy, padding_ratio: float):
 def preprocess_for_ocr(crop: np.ndarray, upscale_factor: int) -> np.ndarray:
     """x3 cubic upscale + histogram equalisation (same as the Paddle path).
     With Paddle-matched detector settings this is the best-scoring input on
-    the labelled crop set (203 correct vs 183 on the raw crop)."""
-    upscaled = cv2.resize(
+    the labelled crop set (203 correct vs 183 on the raw crop).
+
+    The factor is capped so the upscaled crop's longest side stays within
+    OCR_UPSCALE_MAX_SIDE (never below 1x), bounding memory for huge boxes."""
+    longest = max(crop.shape[:2]) or 1
+    factor = max(1.0, min(float(upscale_factor), OCR_UPSCALE_MAX_SIDE / longest))
+    upscaled = crop if factor == 1.0 else cv2.resize(
         crop,
         None,
-        fx=upscale_factor,
-        fy=upscale_factor,
+        fx=factor,
+        fy=factor,
         interpolation=cv2.INTER_CUBIC,
     )
 
